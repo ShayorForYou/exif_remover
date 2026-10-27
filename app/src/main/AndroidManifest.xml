@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- File access comes from the pickers and share intents. This one only un-redacts GPS when reading,
-         so "replace original" can't overwrite a real location with Android's blanked-out copy. -->
+    <!-- Read access to the photo library, for the in-app gallery used by "Replace original" (its items are real
+         MediaStore rows, so they can be edited in place). Android 14+ lets the user grant only some photos. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
+    <!-- Un-redacts GPS when reading, so the details screen can show the real coordinates. -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 
     <application

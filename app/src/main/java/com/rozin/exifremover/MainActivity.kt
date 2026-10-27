@@ -1,10 +1,10 @@
 package com.rozin.exifremover
 
-import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.graphics.Color
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -29,9 +29,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.rozin.exifremover.core.LibraryAccess
+import com.rozin.exifremover.core.MediaLibrary
 import com.rozin.exifremover.core.Prefs
 import com.rozin.exifremover.core.SaveMode
 import com.rozin.exifremover.core.ThemeMode
@@ -40,6 +43,8 @@ import com.rozin.exifremover.core.sharedImageUris
 import com.rozin.exifremover.ui.AppTheme
 import com.rozin.exifremover.ui.CleanState
 import com.rozin.exifremover.ui.CleanViewModel
+import com.rozin.exifremover.ui.GalleryScreen
+import com.rozin.exifremover.ui.GalleryViewModel
 import com.rozin.exifremover.ui.HomeScreen
 import com.rozin.exifremover.ui.InspectScreen
 import com.rozin.exifremover.ui.isDark
@@ -49,6 +54,7 @@ import com.rozin.exifremover.ui.WorkingScreen
 class MainActivity : ComponentActivity() {
 
     private val viewModel: CleanViewModel by viewModels()
+    private val gallery: GalleryViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +76,7 @@ class MainActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     App(
                         viewModel = viewModel,
+                        gallery = gallery,
                         themeMode = themeMode,
                         onThemeModeChange = {
                             themeMode = it
@@ -100,18 +107,28 @@ class MainActivity : ComponentActivity() {
 
 private const val MAX_PICK = 100
 
+/** The in-app gallery sits in front of the home screen, before any cleaning state exists. */
+private object GalleryRoute
+
 @Composable
-private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Unit) {
+private fun App(
+    viewModel: CleanViewModel,
+    gallery: GalleryViewModel,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsState()
+    val galleryState by gallery.state.collectAsState()
     var saveMode by remember { mutableStateOf(Prefs.saveMode(context)) }
     var keepOrientation by remember { mutableStateOf(Prefs.keepOrientation(context)) }
+    var picking by rememberSaveable { mutableStateOf(false) }
 
-    // The photo picker hands out read-only copies, so replacing originals needs the document picker,
-    // whose URIs map back to the real MediaStore rows.
+    // "Save a copy": the system photo picker. Its URIs are read-only stand-ins, fine for making copies.
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_PICK)) {
         viewModel.open(it, SaveMode.COPY, keepOrientation)
     }
+    // "Replace" fallback when photo access is denied: document URIs map back to the real MediaStore rows.
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         viewModel.open(it, SaveMode.REPLACE, keepOrientation)
     }
@@ -119,21 +136,56 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
         viewModel.onWriteConsent(it.resultCode == Activity.RESULT_OK)
     }
     val photoRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-    // Optional: without it Android hides GPS values from us, so the details screen can't show the real
-    // coordinates. Everything is stripped either way, so replacing works whether or not it's granted.
-    val mediaLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        documentPicker.launch(arrayOf("image/*"))
+    // "Replace": the in-app gallery lists real MediaStore rows, which can be edited in place after consent.
+    // Re-requesting from inside the gallery is how Android 14+ users add more photos to limited access.
+    val libraryAccess = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (MediaLibrary.access(context) == LibraryAccess.NONE) {
+            picking = false
+            Toast.makeText(context, "No photo access. Choose files instead.", Toast.LENGTH_SHORT).show()
+            documentPicker.launch(arrayOf("image/*"))
+        } else {
+            gallery.refresh()
+            picking = true
+        }
+    }
+    fun openGallery() {
+        if (MediaLibrary.access(context) == LibraryAccess.NONE) {
+            libraryAccess.launch(MediaLibrary.permissions())
+        } else {
+            gallery.refresh()
+            picking = true
+        }
+    }
+    fun closeGallery() {
+        picking = false
+        gallery.clearSelection()
     }
 
+    val screen: Any = if (picking && state is CleanState.Idle) GalleryRoute else state
+    BackHandler(enabled = screen === GalleryRoute) { closeGallery() }
     BackHandler(enabled = state !is CleanState.Idle && state !is CleanState.Working, onBack = viewModel::reset)
 
     AnimatedContent(
-        targetState = state,
-        contentKey = { it::class },
+        targetState = screen,
+        contentKey = { if (it === GalleryRoute) "gallery" else it::class },
         transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.96f)) togetherWith fadeOut() },
         label = "screen",
     ) { current ->
         when (current) {
+            GalleryRoute -> GalleryScreen(
+                state = galleryState,
+                onBack = ::closeGallery,
+                onAlbum = gallery::selectAlbum,
+                onToggle = { gallery.toggle(it.uri) },
+                onSelectAll = gallery::selectAllVisible,
+                onClear = gallery::clearSelection,
+                onAddMore = { libraryAccess.launch(MediaLibrary.permissions()) },
+                onClean = {
+                    val uris = galleryState.selected.toList()
+                    closeGallery()
+                    viewModel.open(uris, SaveMode.REPLACE, keepOrientation)
+                },
+            )
             CleanState.Idle -> HomeScreen(
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
@@ -150,7 +202,7 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
                 onChoosePhotos = {
                     when (saveMode) {
                         SaveMode.COPY -> photoPicker.launch(photoRequest)
-                        SaveMode.REPLACE -> mediaLocation.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                        SaveMode.REPLACE -> openGallery()
                     }
                 },
             )
