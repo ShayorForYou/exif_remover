@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +55,7 @@ import com.rozin.exifremover.core.CleanResult
 import com.rozin.exifremover.core.GALLERY_FOLDER
 import com.rozin.exifremover.core.SaveMode
 import com.rozin.exifremover.core.SaveOutcome
+import kotlinx.coroutines.delay
 
 @Composable
 fun ResultsScreen(
@@ -67,7 +69,17 @@ fun ResultsScreen(
     val cleaned = state.cleaned
     val single = state.results.size == 1
     val located = cleaned.count { it.hadLocation }
-    val removedBytes = cleaned.sumOf { (it.originalBytes - it.file.length()).coerceAtLeast(0) }
+    val removedBytes = cleaned.sumOf { it.removedBytes }
+
+    // A clean save is the end of the flow: show the confirmation briefly, then head home.
+    // On partial failure, stay so the message can be read.
+    LaunchedEffect(state.saved) {
+        val saved = state.saved ?: return@LaunchedEffect
+        if (saved.failed == 0) {
+            delay(SAVED_RETURN_DELAY_MS)
+            onClose()
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(colors.background)) {
         LazyVerticalGrid(
@@ -188,6 +200,8 @@ fun ResultsScreen(
         }
     }
 }
+
+private const val SAVED_RETURN_DELAY_MS = 1400L
 
 private fun SaveOutcome.describe(): String = buildList {
     if (replaced > 0) add("$replaced original${if (replaced == 1) "" else "s"} replaced")

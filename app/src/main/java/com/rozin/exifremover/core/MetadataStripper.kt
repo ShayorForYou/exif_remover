@@ -6,6 +6,9 @@ enum class ImageFormat(val mimeType: String, val extension: String) {
     JPEG("image/jpeg", "jpg"),
     PNG("image/png", "png"),
     WEBP("image/webp", "webp"),
+    HEIC("image/heic", "heic"),
+    HEIF("image/heif", "heif"),
+    AVIF("image/avif", "avif"),
 }
 
 class MalformedImageException(message: String) : Exception(message)
@@ -22,19 +25,27 @@ object MetadataStripper {
         b.size >= 3 && b.u8(0) == 0xFF && b.u8(1) == SOI && b.u8(2) == 0xFF -> ImageFormat.JPEG
         b.startsWith(PNG_SIGNATURE, 0) -> ImageFormat.PNG
         b.startsWith(RIFF, 0) && b.startsWith(WEBP, 8) -> ImageFormat.WEBP
-        else -> null
+        else -> heifBrands(b).let { brands ->
+            when {
+                brands.any { it in AVIF_BRANDS } -> ImageFormat.AVIF
+                brands.any { it in HEIC_BRANDS } -> ImageFormat.HEIC
+                brands.any { it in HEIF_BRANDS } -> ImageFormat.HEIF
+                else -> null
+            }
+        }
     }
 
     /**
      * Writes a metadata-free copy of [b] to [out].
      * With [keepOrientation], a 36-byte EXIF block holding only the rotation tag is kept for JPEGs,
-     * so portrait photos don't come out sideways.
+     * so portrait photos don't come out sideways. HEIF/AVIF keep rotation in their own box regardless.
      */
     fun strip(b: ByteArray, format: ImageFormat, out: OutputStream, keepOrientation: Boolean): StripReport =
         when (format) {
             ImageFormat.JPEG -> stripJpeg(b, out, keepOrientation)
             ImageFormat.PNG -> stripPng(b, out)
             ImageFormat.WEBP -> stripWebp(b, out)
+            ImageFormat.HEIC, ImageFormat.HEIF, ImageFormat.AVIF -> stripHeif(b, out)
         }
 
     // JPEG: a sequence of FFxx marker segments; entropy-coded data follows each SOS.
@@ -201,6 +212,172 @@ object MetadataStripper {
         return StripReport(removedBytes = b.size - (12 + body), hadLocation = hadLocation)
     }
 
+    // HEIF / AVIF (ISO-BMFF): EXIF and XMP are "items" whose bytes the 'iloc' box points at. Removing
+    // them would mean rewriting every offset in the file, so instead their bytes are overwritten in place
+    // with an empty block. Layout, size and image data stay identical; rotation lives in 'irot', untouched.
+
+    private class Box(val type: String, val body: Int, val end: Int)
+
+    private enum class HeifMeta { EXIF, XMP }
+
+    private fun stripHeif(b: ByteArray, out: OutputStream): StripReport {
+        val meta = findBox(b, 0, b.size, "meta") ?: throw MalformedImageException("HEIF without a meta box")
+        val children = meta.body + 4 // FullBox version + flags
+        val kinds = heifMetadataItems(b, children, meta.end)
+        val extents = heifItemExtents(b, children, meta.end, kinds.keys)
+
+        val clean = b.copyOf()
+        var removed = 0
+        var hadLocation = false
+        for ((id, kind) in kinds) {
+            val ranges = extents[id] ?: continue
+            val payload = ranges.fold(ByteArray(0)) { acc, r -> acc + b.copyOfRange(r.first, r.last + 1) }
+            hadLocation = hadLocation || when (kind) {
+                // Exif item: 4-byte offset to the TIFF header, then (usually "Exif\0\0" and) the TIFF data.
+                HeifMeta.EXIF -> payload.size >= 4 && payload.u32be(0) < payload.size &&
+                    readExif(payload, 4 + payload.u32be(0).toInt(), payload.size).hasLocation
+                HeifMeta.XMP -> payload.containsAscii(GPS_XMP_KEY, 0, payload.size)
+            }
+            val blank = if (kind == HeifMeta.EXIF) emptyHeifExif(payload.size) else emptyXmp(payload.size)
+            var k = 0
+            for (r in ranges) for (at in r) clean[at] = blank[k++]
+            removed += payload.size
+        }
+        out.write(clean)
+        return StripReport(removedBytes = removed, hadLocation = hadLocation)
+    }
+
+    /** Item IDs of the EXIF and XMP items, from 'iinf'. */
+    private fun heifMetadataItems(b: ByteArray, from: Int, to: Int): Map<Int, HeifMeta> {
+        val iinf = findBox(b, from, to, "iinf") ?: return emptyMap()
+        val first = iinf.body + 4 + if (b.u8(iinf.body) == 0) 2 else 4 // FullBox header + entry_count
+        val items = HashMap<Int, HeifMeta>()
+        for (infe in boxes(b, first, iinf.end)) {
+            if (infe.type != "infe") continue
+            val version = b.u8(infe.body)
+            if (version < 2) continue // v0/v1 entries can't describe Exif or mime items
+            var p = infe.body + 4
+            val id = if (version == 2) b.u16be(p).also { p += 2 } else b.u32be(p).toInt().also { p += 4 }
+            p += 2 // item_protection_index
+            if (p + 4 > infe.end) continue
+            when (String(b, p, 4, Charsets.ISO_8859_1)) {
+                "Exif" -> items[id] = HeifMeta.EXIF
+                "mime" -> {
+                    val nameEnd = b.indexOfZero(p + 4, infe.end)
+                    val typeEnd = b.indexOfZero(nameEnd + 1, infe.end)
+                    val contentType = if (typeEnd > nameEnd) String(b, nameEnd + 1, typeEnd - nameEnd - 1, Charsets.ISO_8859_1) else ""
+                    if ("rdf+xml" in contentType) items[id] = HeifMeta.XMP
+                }
+            }
+        }
+        return items
+    }
+
+    /** Absolute byte ranges of each wanted item, from 'iloc'. */
+    private fun heifItemExtents(b: ByteArray, from: Int, to: Int, wanted: Set<Int>): Map<Int, List<IntRange>> {
+        if (wanted.isEmpty()) return emptyMap()
+        val iloc = findBox(b, from, to, "iloc") ?: throw MalformedImageException("HEIF without iloc")
+        val idat = findBox(b, from, to, "idat")
+        val version = b.u8(iloc.body)
+        var p = iloc.body + 4
+        fun read(size: Int): Long {
+            if (p + size > iloc.end) throw MalformedImageException("Truncated iloc")
+            val v = when (size) {
+                0 -> 0L
+                2 -> b.u16be(p).toLong()
+                4 -> b.u32be(p)
+                8 -> if (b.u32be(p) == 0L) b.u32be(p + 4) else throw MalformedImageException("HEIF offset over 4 GB")
+                else -> throw MalformedImageException("Bad iloc field size $size")
+            }
+            p += size
+            return v
+        }
+        val sizes = read(2).toInt()
+        val offsetSize = sizes shr 12
+        val lengthSize = (sizes shr 8) and 0x0F
+        val baseSize = (sizes shr 4) and 0x0F
+        val indexSize = if (version == 1 || version == 2) sizes and 0x0F else 0
+        val count = read(if (version < 2) 2 else 4).toInt()
+
+        val result = HashMap<Int, List<IntRange>>()
+        repeat(count) {
+            val id = read(if (version < 2) 2 else 4).toInt()
+            val method = if (version == 1 || version == 2) read(2).toInt() and 0x0F else 0
+            read(2) // data_reference_index
+            val base = read(baseSize)
+            val ranges = ArrayList<IntRange>()
+            repeat(read(2).toInt()) {
+                if (indexSize > 0) read(indexSize)
+                val offset = read(offsetSize)
+                val length = read(lengthSize)
+                val origin = when (method) {
+                    0 -> 0L
+                    1 -> idat?.body?.toLong() ?: throw MalformedImageException("iloc refers to a missing idat")
+                    else -> -1L // built from other items: no bytes of its own to blank
+                }
+                if (origin >= 0 && length > 0) {
+                    val start = origin + base + offset
+                    if (start + length > b.size) throw MalformedImageException("HEIF item outside the file")
+                    ranges += start.toInt() until (start + length).toInt()
+                }
+            }
+            if (id in wanted && ranges.isNotEmpty()) result[id] = ranges
+        }
+        return result
+    }
+
+    private fun boxes(b: ByteArray, from: Int, to: Int): Sequence<Box> = sequence {
+        var i = from
+        while (i + 8 <= to) {
+            var size = b.u32be(i)
+            var header = 8
+            when (size) {
+                0L -> size = (to - i).toLong() // extends to the end of the parent
+                1L -> {
+                    if (i + 16 > to || b.u32be(i + 8) != 0L) throw MalformedImageException("Box too large at $i")
+                    size = b.u32be(i + 12)
+                    header = 16
+                }
+            }
+            if (size < header || size > to - i) throw MalformedImageException("Bad box size at $i")
+            yield(Box(String(b, i + 4, 4, Charsets.ISO_8859_1), i + header, i + size.toInt()))
+            i += size.toInt()
+        }
+    }
+
+    private fun findBox(b: ByteArray, from: Int, to: Int, type: String) = boxes(b, from, to).firstOrNull { it.type == type }
+
+    private fun heifBrands(b: ByteArray): Set<String> {
+        if (b.size < 16 || !b.startsWith(FTYP, 4)) return emptySet()
+        val end = minOf(b.u32be(0), b.size.toLong()).toInt()
+        return (sequenceOf(8) + generateSequence(16) { it + 4 }.takeWhile { it + 4 <= end })
+            .map { String(b, it, 4, Charsets.ISO_8859_1) }
+            .toSet()
+    }
+
+    /** A valid Exif item holding an empty TIFF (no tags), zero-padded to [size]. */
+    private fun emptyHeifExif(size: Int): ByteArray {
+        val minimal = byteArrayOf(0, 0, 0, 0, 'M'.code.toByte(), 'M'.code.toByte(), 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0)
+        return if (size >= minimal.size) minimal.copyOf(size) else ByteArray(size)
+    }
+
+    /** An empty XMP packet, space-padded to [size] (XMP explicitly allows whitespace padding). */
+    private fun emptyXmp(size: Int): ByteArray {
+        val head = ascii("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>")
+        val tail = ascii("<?xpacket end=\"w\"?>")
+        val out = ByteArray(size) { ' '.code.toByte() }
+        if (size >= head.size + tail.size) {
+            head.copyInto(out)
+            tail.copyInto(out, size - tail.size)
+        }
+        return out
+    }
+
+    private fun ByteArray.indexOfZero(from: Int, to: Int): Int {
+        for (i in from until to) if (this[i].toInt() == 0) return i
+        return to
+    }
+
     // EXIF (TIFF) parsing — only IFD0 is needed for orientation and the GPS pointer.
 
     private class ExifInfo(val orientation: Int, val hasLocation: Boolean)
@@ -283,4 +460,8 @@ object MetadataStripper {
     private val WEBP_VP8X = ascii("VP8X")
     private val WEBP_EXIF = ascii("EXIF")
     private val WEBP_XMP = ascii("XMP ")
+    private val FTYP = ascii("ftyp")
+    private val HEIC_BRANDS = setOf("heic", "heix", "heim", "heis", "hevc", "hevx", "hevm", "hevs")
+    private val HEIF_BRANDS = setOf("mif1", "msf1", "mif2")
+    private val AVIF_BRANDS = setOf("avif", "avis")
 }

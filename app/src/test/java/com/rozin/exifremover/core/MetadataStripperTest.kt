@@ -2,12 +2,14 @@ package com.rozin.exifremover.core
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import javax.imageio.ImageIO
 
 class MetadataStripperTest {
@@ -89,7 +91,73 @@ class MetadataStripperTest {
         assertTrue(report.hadLocation)
     }
 
+    // HEIF
+
+    /** A real file from macOS `sips`, with EXIF (GPS, model, artist) and an XMP item added by exiftool. */
+    @Test
+    fun realHeicIsBlankedInPlaceAndKeepsItsSize() {
+        val original = requireNotNull(javaClass.getResourceAsStream("/gps_exif_xmp.heic")).use { it.readBytes() }
+        assertEquals(ImageFormat.HEIC, MetadataStripper.detect(original))
+
+        val (out, report) = strip(original, keepOrientation = true)
+
+        assertEquals(original.size, out.size)
+        assertTrue(report.hadLocation)
+        assertTrue(report.removedBytes > 0)
+        // Only metadata bytes may change; the image data and every offset stay put.
+        assertTrue(original.indices.count { original[it] != out[it] } <= report.removedBytes)
+        assertTrue("GPSLatitude" !in String(out, Charsets.ISO_8859_1))
+
+        // A second pass finds nothing left to report.
+        val (again, secondReport) = strip(out, keepOrientation = true)
+        assertArrayEquals(out, again)
+        assertFalse(secondReport.hadLocation)
+
+        // Kept for checking by hand with exiftool / an image viewer.
+        File("build/test-output").apply { mkdirs() }.resolve("gps_exif_xmp.stripped.heic").writeBytes(out)
+    }
+
+    /** Synthetic file exercising iloc v1 and EXIF stored inside the meta box's 'idat'. */
+    @Test
+    fun heifExifInIdatIsBlanked() {
+        val exif = be32(6) + "Exif\u0000\u0000".toByteArray() + tiffWithGps()
+        val dirty = heif(exif)
+
+        val (out, report) = strip(dirty, keepOrientation = false)
+
+        val blank = bytes(0, 0, 0, 0, 'M', 'M', 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0).copyOf(exif.size)
+        assertArrayEquals(heif(blank), out)
+        assertTrue(report.hadLocation)
+        assertEquals(exif.size, report.removedBytes)
+    }
+
     // Helpers
+
+    private fun box(type: String, body: ByteArray) = be32(8 + body.size) + type.toByteArray() + body
+
+    private fun fullBox(type: String, version: Int, body: ByteArray) = box(type, bytes(version, 0, 0, 0) + body)
+
+    /** ftyp + meta(iinf, iloc v1, idat[exif]) + mdat[image]; item 1 is the image, item 2 the EXIF in idat. */
+    private fun heif(exif: ByteArray): ByteArray {
+        val image = bytes(0x11, 0x22, 0x33, 0x44, 0x55)
+        val ftyp = box("ftyp", "heic".toByteArray() + be32(0) + "mif1heic".toByteArray())
+        val iinf = fullBox(
+            "iinf", 0,
+            bytes(0, 2) +
+                fullBox("infe", 2, bytes(0, 1, 0, 0) + "hvc1".toByteArray() + bytes(0)) +
+                fullBox("infe", 2, bytes(0, 2, 0, 0) + "Exif".toByteArray() + bytes(0)),
+        )
+        fun iloc(imageOffset: Int) = fullBox(
+            "iloc", 1,
+            bytes(0x44, 0x00, 0, 2) + // offset/length size 4, base/index size 0; 2 items
+                bytes(0, 1, 0, 0, 0, 0, 0, 1) + be32(imageOffset) + be32(image.size) + // method 0 (file)
+                bytes(0, 2, 0, 1, 0, 0, 0, 1) + be32(0) + be32(exif.size), // method 1 (idat)
+        )
+        val idat = box("idat", exif)
+        val metaSize = fullBox("meta", 0, iinf + iloc(0) + idat).size
+        val imageOffset = ftyp.size + metaSize + 8
+        return ftyp + fullBox("meta", 0, iinf + iloc(imageOffset) + idat) + box("mdat", image)
+    }
 
     private fun strip(input: ByteArray, keepOrientation: Boolean): Pair<ByteArray, StripReport> {
         val format = requireNotNull(MetadataStripper.detect(input)) { "undetected format" }

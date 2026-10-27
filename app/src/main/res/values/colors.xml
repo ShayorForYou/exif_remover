@@ -2,4 +2,7 @@
 <resources>
     <!-- Keep in sync with the Compose background in ui/Theme.kt. -->
     <color name="background">#FAFAFA</color>
+    <!-- Launcher icon tile and the circle behind the splash-screen icon. A warm off-white, a shade darker than the
+         light app background so the splash circle still reads on a light window. -->
+    <color name="icon_background">#F6F1E9</color>
 </resources>

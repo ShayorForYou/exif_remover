@@ -2,6 +2,7 @@ package com.rozin.exifremover.core
 
 import android.content.ClipData
 import android.content.ComponentName
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -77,22 +78,46 @@ data class SaveOutcome(val replaced: Int, val copied: Int, val failed: Int)
  * The MediaStore row behind a picked image, which is what we need to overwrite it.
  * Photo-picker URIs are read-only copies with no such row, so they map to null.
  */
-fun Context.mediaStoreUri(source: Uri): Uri? = when {
-    source.authority == MediaStore.AUTHORITY ->
-        source.takeUnless { it.pathSegments.firstOrNull().orEmpty().startsWith("picker") }
-    DocumentsContract.isDocumentUri(this, source) -> runCatching { MediaStore.getMediaUri(this, source) }.getOrNull()
-    else -> null
+fun Context.mediaStoreUri(source: Uri): Uri? {
+    val uri = when {
+        source.authority == MediaStore.AUTHORITY ->
+            source.takeUnless { it.pathSegments.firstOrNull().orEmpty().startsWith("picker") }
+        DocumentsContract.isDocumentUri(this, source) -> runCatching { MediaStore.getMediaUri(this, source) }.getOrNull()
+        else -> null
+    } ?: return null
+    return asImageItem(uri)
 }
 
-/** Originals that can be overwritten in place. Converted (HEIC → JPEG) images can't: the format differs. */
-fun Context.replaceTargets(images: List<CleanResult.Cleaned>): Map<CleanResult.Cleaned, Uri> =
-    images.filterNot { it.reencoded }
+/**
+ * Document lookups often return a generic Files URI (`/<volume>/file/<id>`), which [MediaStore.createWriteRequest]
+ * rejects; it only takes Images/Video/Audio items. The same row ID is valid in the Images collection.
+ */
+private fun asImageItem(uri: Uri): Uri {
+    val segments = uri.pathSegments
+    val id = segments.getOrNull(2)?.toLongOrNull()
+    if (segments.size != 3 || segments[1] != "file" || id == null) return uri
+    return ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(segments[0]), id)
+}
+
+/**
+ * Originals that can be overwritten in place. Images converted to JPEG (GIF, BMP…) can't: the format differs.
+ * Nor can files Android doesn't index as photos (e.g. inside an app's private folder); those are saved as copies.
+ */
+fun Context.replaceTargets(images: List<CleanResult.Cleaned>): Map<CleanResult.Cleaned, Uri> {
+    val candidates = images.filterNot { it.reencoded }
         .mapNotNull { image -> mediaStoreUri(image.source)?.let { image to it } }
         .toMap()
+    if (candidates.isEmpty() || canRequestWrite(candidates.values)) return candidates
+    // A single ineligible item fails the whole batch request, so check them one by one.
+    return candidates.filterValues { canRequestWrite(listOf(it)) }
+}
 
-/** System "Allow EXIF Remover to modify these photos?" dialog. */
-fun Context.writeRequest(uris: Collection<Uri>): IntentSender =
-    MediaStore.createWriteRequest(contentResolver, uris).intentSender
+private fun Context.canRequestWrite(uris: Collection<Uri>) =
+    runCatching { MediaStore.createWriteRequest(contentResolver, uris) }.isSuccess
+
+/** System "Allow EXIF Remover to modify these photos?" dialog, or null if Android refuses to build one. */
+fun Context.writeRequest(uris: Collection<Uri>): IntentSender? =
+    runCatching { MediaStore.createWriteRequest(contentResolver, uris).intentSender }.getOrNull()
 
 /** Overwrites each original with its cleaned bytes (after the user granted [writeRequest]). */
 fun Context.overwriteOriginals(targets: Map<CleanResult.Cleaned, Uri>): Int = targets.count { (image, uri) ->

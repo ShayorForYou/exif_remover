@@ -1,22 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A photo frame with a location pin crossed out. -->
+<!-- A photo in colour on a plain off-white tile: slate frame, sage mountain, amber sun, and a terracotta badge
+     holding a crossed-out location pin. Drawn on the 108dp adaptive-icon canvas. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="4"
-        android:pathData="M34,36h40a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-40a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,42c-5,0 -9,4 -9,9c0,7 9,15 9,15s9,-8 9,-15c0,-5 -4,-9 -9,-9zM54,54.5a3.5,3.5 0,1 1,0 -7a3.5,3.5 0,0 1,0 7z" />
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="4"
-        android:pathData="M40,72L68,36" />
+
+    <!-- Scaled so the artwork keeps a generous margin inside the 66dp safe circle
+         (the furthest corner lands ~28dp from the centre). -->
+    <group android:pivotX="54" android:pivotY="54" android:scaleX="0.78" android:scaleY="0.78">
+
+        <!-- Photo frame, left open at the bottom-right corner where the badge sits. -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#3D5A80"
+            android:strokeWidth="4"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M51,68 H33 A6,6 0 0,1 27,62 V36 A6,6 0 0,1 33,30 H62 A6,6 0 0,1 68,36 V51" />
+
+        <!-- Mountains -->
+        <path
+            android:fillColor="#5E9C8A"
+            android:pathData="M32.5,62.5 L43,49.5 L49.5,56.5 L53.5,52.5 L57,57 L50.5,62.5 Z" />
+
+        <!-- Sun -->
+        <path
+            android:fillColor="#F2A541"
+            android:pathData="M55.5,40 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0 Z" />
+
+        <!-- Badge -->
+        <path
+            android:fillColor="#D9664A"
+            android:pathData="M55,68 a13,13 0 1,0 26,0 a13,13 0 1,0 -26,0 Z" />
+
+        <!-- Location pin with its centre punched out -->
+        <path
+            android:fillColor="#FFF8F2"
+            android:fillType="evenOdd"
+            android:pathData="M68,59 a5.8,5.8 0 0,0 -5.8,5.8 c0,4 5.8,10.4 5.8,10.4 s5.8,-6.4 5.8,-10.4 a5.8,5.8 0 0,0 -5.8,-5.8 Z M68,67 a2.2,2.2 0 1,1 0,-4.4 a2.2,2.2 0 1,1 0,4.4 Z" />
+
+        <!-- Slash: a badge-coloured cut, then the cream stroke on top -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#D9664A"
+            android:strokeWidth="3.6"
+            android:strokeLineCap="round"
+            android:pathData="M62.2,59.6 L73.8,74.4" />
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFF8F2"
+            android:strokeWidth="1.9"
+            android:strokeLineCap="round"
+            android:pathData="M62.2,59.6 L73.8,74.4" />
+    </group>
 </vector>

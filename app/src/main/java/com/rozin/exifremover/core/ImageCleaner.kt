@@ -30,21 +30,18 @@ sealed interface CleanResult {
         val file: File,
         val mimeType: String,
         val originalBytes: Long,
+        /** Metadata bytes removed. HEIF files keep their size (metadata is blanked in place), so it's tracked directly. */
+        val removedBytes: Long,
         val hadLocation: Boolean,
-        /** True when the format had no lossless path (e.g. HEIC) and was converted to JPEG. */
+        /** True when the format had no lossless path (e.g. GIF, BMP) and was converted to JPEG. */
         val reencoded: Boolean,
     ) : CleanResult
 
     data class Failed(override val source: Uri, val reason: String) : CleanResult
 }
 
-/** What a single photo carries, for the pick-what-to-remove screen. */
-data class Inspection(
-    val source: Uri,
-    val fields: List<ExifField>,
-    /** False for formats ExifInterface can't rewrite (HEIC/AVIF): only "remove all" is possible. */
-    val selectable: Boolean,
-)
+/** What a single photo carries, for the details screen. */
+data class Inspection(val source: Uri, val fields: List<ExifField>)
 
 class ImageCleaner(private val context: Context) {
 
@@ -72,26 +69,7 @@ class ImageCleaner(private val context: Context) {
     suspend fun inspect(uri: Uri): Inspection = withContext(Dispatchers.IO) {
         val bytes = readBytes(uri)
         val fields = runCatching { ExifCatalog.read(ExifInterface(ByteArrayInputStream(bytes))) }.getOrDefault(emptyList())
-        Inspection(uri, fields, selectable = MetadataStripper.detect(bytes) != null)
-    }
-
-    /** Removes only [tags], leaving everything else (and the pixels) untouched. */
-    suspend fun removeTags(uri: Uri, tags: Set<String>): CleanResult = withContext(Dispatchers.IO) {
-        try {
-            val bytes = readBytes(uri)
-            val format = MetadataStripper.detect(bytes)
-                ?: throw IllegalStateException("This format can only be cleaned completely")
-            val out = newOutputFile(format.extension)
-            out.writeBytes(bytes)
-            ExifInterface(out).apply {
-                tags.forEach { setAttribute(it, null) }
-                saveAttributes()
-            }
-            val removedLocation = ExifInterface.TAG_GPS_LATITUDE in tags
-            CleanResult.Cleaned(uri, out, format.mimeType, bytes.size.toLong(), removedLocation, reencoded = false)
-        } catch (e: Exception) {
-            CleanResult.Failed(uri, e.message ?: e.javaClass.simpleName)
-        }
+        Inspection(uri, fields)
     }
 
     private fun readBytes(uri: Uri): ByteArray =
@@ -100,7 +78,7 @@ class ImageCleaner(private val context: Context) {
 
     /**
      * Android blanks out GPS values unless we hold ACCESS_MEDIA_LOCATION and ask for the original.
-     * Reading the unredacted bytes matters when replacing in place with some fields kept.
+     * Everything is stripped either way; the real values only matter for showing them on the details screen.
      */
     private fun openOriginal(uri: Uri): InputStream? {
         if (context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -124,14 +102,16 @@ class ImageCleaner(private val context: Context) {
             val report = out.outputStream().buffered(BUFFER_SIZE).use {
                 MetadataStripper.strip(bytes, format, it, keepOrientation)
             }
-            CleanResult.Cleaned(uri, out, format.mimeType, bytes.size.toLong(), report.hadLocation, reencoded = false)
+            CleanResult.Cleaned(
+                uri, out, format.mimeType, bytes.size.toLong(), report.removedBytes.toLong(), report.hadLocation, reencoded = false,
+            )
         } catch (e: MalformedImageException) {
             out.delete()
             null // let the decoder have a go; it's more forgiving of odd files
         }
     }
 
-    /** Fallback for HEIC/AVIF/etc: decode pixels and write a fresh JPEG, which carries no metadata. */
+    /** Fallback for formats with no lossless path, or malformed files: decode pixels and write a fresh JPEG. */
     private fun reencode(uri: Uri, bytes: ByteArray): CleanResult {
         val hadLocation = runCatching { ExifInterface(ByteArrayInputStream(bytes)).latLong != null }.getOrDefault(false)
         // ImageDecoder applies the EXIF rotation to the pixels, so the output is upright without the tag.
@@ -144,7 +124,8 @@ class ImageCleaner(private val context: Context) {
         } finally {
             bitmap.recycle()
         }
-        return CleanResult.Cleaned(uri, out, ImageFormat.JPEG.mimeType, bytes.size.toLong(), hadLocation, reencoded = true)
+        val removed = (bytes.size - out.length()).coerceAtLeast(0)
+        return CleanResult.Cleaned(uri, out, ImageFormat.JPEG.mimeType, bytes.size.toLong(), removed, hadLocation, reencoded = true)
     }
 
     // Random names: the original filename often embeds the capture date and time.

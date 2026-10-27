@@ -134,7 +134,7 @@ fun HomeScreen(
             if (saveMode == SaveMode.COPY) {
                 "Copies are saved to Pictures/$GALLERY_FOLDER."
             } else {
-                "Android asks before each edit. HEIC and cloud photos are saved as copies."
+                "Android asks before each edit. Cloud photos are saved as copies."
             },
             style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant,

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same as values/themes.xml, plus the Android 12+ splash screen. The splash draws only the icon's foreground
+         (white artwork), so it needs the dark icon-background circle to be visible on a light window. -->
+    <style name="Theme.ExifRemover" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowSplashScreenBackground">@color/background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/icon_background</item>
+    </style>
+
+    <!-- Share target floats over the calling app instead of opening a full screen. -->
+    <style name="Theme.ExifRemover.Overlay" parent="Theme.ExifRemover">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

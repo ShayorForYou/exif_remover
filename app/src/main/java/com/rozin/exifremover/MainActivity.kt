@@ -3,9 +3,7 @@ package com.rozin.exifremover
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
-import android.widget.Toast
 import android.graphics.Color
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -95,11 +93,8 @@ class MainActivity : ComponentActivity() {
     private fun openShared(intent: Intent) {
         val uris = intent.sharedImageUris().take(MAX_PICK)
         if (uris.isEmpty()) return
-        // In-place replace is only safe with unredacted reads (see the mediaLocation request below).
-        val canReplace = Prefs.saveMode(this) == SaveMode.REPLACE &&
-            checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
         viewModel.reset()
-        viewModel.open(uris, if (canReplace) SaveMode.REPLACE else SaveMode.COPY, Prefs.keepOrientation(this))
+        viewModel.open(uris, Prefs.saveMode(this), Prefs.keepOrientation(this))
     }
 }
 
@@ -124,17 +119,10 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
         viewModel.onWriteConsent(it.resultCode == Activity.RESULT_OK)
     }
     val photoRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-    // Without it we only ever see GPS-redacted bytes, and writing those back would erase locations
-    // the user chose to keep. So no permission, no in-place replace.
-    val mediaLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            documentPicker.launch(arrayOf("image/*"))
-        } else {
-            saveMode = SaveMode.COPY
-            Prefs.setSaveMode(context, SaveMode.COPY)
-            Toast.makeText(context, "Replacing needs media location access. Saving copies instead.", Toast.LENGTH_LONG).show()
-            photoPicker.launch(photoRequest)
-        }
+    // Optional: without it Android hides GPS values from us, so the details screen can't show the real
+    // coordinates. Everything is stripped either way, so replacing works whether or not it's granted.
+    val mediaLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        documentPicker.launch(arrayOf("image/*"))
     }
 
     BackHandler(enabled = state !is CleanState.Idle && state !is CleanState.Working, onBack = viewModel::reset)
@@ -170,10 +158,6 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
             is CleanState.Inspecting -> InspectScreen(
                 state = current,
                 onBack = viewModel::reset,
-                onToggleField = viewModel::toggleField,
-                onToggleGroup = viewModel::toggleGroup,
-                onSelect = viewModel::select,
-                onRemoveSelected = viewModel::removeSelected,
                 onRemoveAll = { viewModel.removeAll(keepOrientation) },
             )
             is CleanState.Done -> ResultsScreen(

@@ -28,13 +28,8 @@ sealed interface CleanState {
 
     data class Working(val done: Int, val total: Int) : CleanState
 
-    data class Inspecting(
-        val inspection: Inspection,
-        val mode: SaveMode,
-        val selected: Set<String>,
-    ) : CleanState {
+    data class Inspecting(val inspection: Inspection, val mode: SaveMode) : CleanState {
         val groups: Map<ExifGroup, List<ExifField>> get() = inspection.fields.groupBy { it.group }
-        val selectedTags: Set<String> get() = inspection.fields.filter { it.id in selected }.flatMap { it.tags }.toSet()
     }
 
     data class Done(
@@ -82,38 +77,9 @@ class CleanViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = CleanState.Working(0, 1)
         viewModelScope.launch {
             _state.value = runCatching { cleaner.inspect(uri) }.fold(
-                onSuccess = { inspection ->
-                    val preselected = inspection.fields.filter { it.sensitive }.map { it.id }.toSet()
-                    CleanState.Inspecting(inspection, mode, preselected)
-                },
+                onSuccess = { CleanState.Inspecting(it, mode) },
                 onFailure = { CleanState.Done(listOf(CleanResult.Failed(uri, it.message ?: "Couldn't read photo")), mode) },
             )
-        }
-    }
-
-    fun toggleField(id: String) = _state.update {
-        if (it !is CleanState.Inspecting) return@update it
-        it.copy(selected = if (id in it.selected) it.selected - id else it.selected + id)
-    }
-
-    fun select(ids: Set<String>) = _state.update {
-        if (it is CleanState.Inspecting) it.copy(selected = ids) else it
-    }
-
-    /** Selects the whole group, or clears it if it was already fully selected. */
-    fun toggleGroup(group: ExifGroup) = _state.update {
-        if (it !is CleanState.Inspecting) return@update it
-        val ids = it.groups[group].orEmpty().map { f -> f.id }.toSet()
-        it.copy(selected = if (it.selected.containsAll(ids)) it.selected - ids else it.selected + ids)
-    }
-
-    fun removeSelected() {
-        val inspecting = _state.value as? CleanState.Inspecting ?: return
-        val tags = inspecting.selectedTags
-        if (tags.isEmpty()) return
-        _state.value = CleanState.Working(0, 1)
-        viewModelScope.launch {
-            _state.value = CleanState.Done(listOf(cleaner.removeTags(inspecting.inspection.source, tags)), inspecting.mode)
         }
     }
 
@@ -132,9 +98,11 @@ class CleanViewModel(application: Application) : AndroidViewModel(application) {
         if (done.saving || done.saved != null) return null
         if (done.mode == SaveMode.REPLACE) {
             val targets = app.replaceTargets(done.cleaned)
-            if (targets.isNotEmpty()) {
+            // No eligible originals, or no consent dialog: fall through and save everything as copies.
+            val request = if (targets.isNotEmpty()) app.writeRequest(targets.values) else null
+            if (request != null) {
                 pendingReplace = targets
-                return app.writeRequest(targets.values)
+                return request
             }
         }
         finishSave(emptyMap())

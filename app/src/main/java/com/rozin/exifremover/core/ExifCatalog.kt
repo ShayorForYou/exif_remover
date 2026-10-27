@@ -48,7 +48,9 @@ object ExifCatalog {
         val xmpHasLocation = "GPSLatitude" in xmp
         return listOf(
             Spec(ExifGroup.LOCATION, "Coordinates", GPS_COORDINATES, sensitive = true) { e ->
-                e.latLong?.let { (lat, lng) -> formatLatLng(lat, lng) } ?: "Present (values hidden by Android)"
+                // Android zeroes GPS values for apps without media-location access.
+                e.latLong?.takeIf { (lat, lng) -> lat != 0.0 || lng != 0.0 }?.let { (lat, lng) -> formatLatLng(lat, lng) }
+                    ?: "Present (values hidden by Android)"
             },
             Spec(ExifGroup.LOCATION, "Altitude", GPS_ALTITUDE, sensitive = true) { e ->
                 "${e.getAltitude(0.0).roundToInt()} m"
