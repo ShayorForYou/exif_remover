@@ -84,12 +84,9 @@ fun Context.mediaStoreUri(source: Uri): Uri? = when {
     else -> null
 }
 
-/**
- * Originals that can be overwritten in place. Converted (HEIC → JPEG) images can't, since the format differs,
- * and neither can ones whose kept data may be GPS-redacted (see [CleanResult.Cleaned.safeToReplace]).
- */
+/** Originals that can be overwritten in place. Converted (HEIC → JPEG) images can't: the format differs. */
 fun Context.replaceTargets(images: List<CleanResult.Cleaned>): Map<CleanResult.Cleaned, Uri> =
-    images.filter { !it.reencoded && it.safeToReplace }
+    images.filterNot { it.reencoded }
         .mapNotNull { image -> mediaStoreUri(image.source)?.let { image to it } }
         .toMap()
 
@@ -108,7 +105,7 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
 object Prefs {
     private const val KEY_KEEP_ORIENTATION = "keep_orientation"
-    private const val KEY_ASKED_MEDIA_LOCATION = "asked_media_location"
+    private const val KEY_SAVE_MODE = "save_mode"
     private const val KEY_THEME_MODE = "theme_mode"
 
     private fun Context.prefs() = getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -118,10 +115,10 @@ object Prefs {
     fun setKeepOrientation(context: Context, keep: Boolean) =
         context.prefs().edit { putBoolean(KEY_KEEP_ORIENTATION, keep) }
 
-    /** Whether we've already asked for media-location access, so it's only asked once. */
-    fun askedMediaLocation(context: Context) = context.prefs().getBoolean(KEY_ASKED_MEDIA_LOCATION, false)
+    fun saveMode(context: Context): SaveMode =
+        runCatching { SaveMode.valueOf(context.prefs().getString(KEY_SAVE_MODE, null)!!) }.getOrDefault(SaveMode.COPY)
 
-    fun setAskedMediaLocation(context: Context) = context.prefs().edit { putBoolean(KEY_ASKED_MEDIA_LOCATION, true) }
+    fun setSaveMode(context: Context, mode: SaveMode) = context.prefs().edit { putString(KEY_SAVE_MODE, mode.name) }
 
     fun themeMode(context: Context): ThemeMode =
         runCatching { ThemeMode.valueOf(context.prefs().getString(KEY_THEME_MODE, null)!!) }.getOrDefault(ThemeMode.SYSTEM)

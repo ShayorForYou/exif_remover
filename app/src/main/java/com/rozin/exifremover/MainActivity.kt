@@ -4,8 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import android.graphics.Color
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.rozin.exifremover.core.Prefs
+import com.rozin.exifremover.core.SaveMode
 import com.rozin.exifremover.core.ThemeMode
 import com.rozin.exifremover.core.shareIntent
 import com.rozin.exifremover.core.sharedImageUris
@@ -93,8 +95,11 @@ class MainActivity : ComponentActivity() {
     private fun openShared(intent: Intent) {
         val uris = intent.sharedImageUris().take(MAX_PICK)
         if (uris.isEmpty()) return
+        // In-place replace is only safe with unredacted reads (see the mediaLocation request below).
+        val canReplace = Prefs.saveMode(this) == SaveMode.REPLACE &&
+            checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
         viewModel.reset()
-        viewModel.open(uris, Prefs.keepOrientation(this))
+        viewModel.open(uris, if (canReplace) SaveMode.REPLACE else SaveMode.COPY, Prefs.keepOrientation(this))
     }
 }
 
@@ -104,31 +109,32 @@ private const val MAX_PICK = 100
 private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Unit) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsState()
+    var saveMode by remember { mutableStateOf(Prefs.saveMode(context)) }
     var keepOrientation by remember { mutableStateOf(Prefs.keepOrientation(context)) }
-    var pendingUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
-    // Media-location access lets the details screen read real GPS values instead of Android's blanked
-    // copy, which is what makes "replace original" safe when the user keeps their location. Asked once.
-    val mediaLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        Prefs.setAskedMediaLocation(context)
-        viewModel.open(pendingUris, keepOrientation)
-        pendingUris = emptyList()
+    // The photo picker hands out read-only copies, so replacing originals needs the document picker,
+    // whose URIs map back to the real MediaStore rows.
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_PICK)) {
+        viewModel.open(it, SaveMode.COPY, keepOrientation)
     }
-    // The document picker (not the photo picker) so picked images map back to their originals,
-    // which keeps "replace original" available at save time.
-    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        val picked = uris.take(MAX_PICK)
-        val askFirst = picked.size == 1 && !Prefs.askedMediaLocation(context) &&
-            context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
-        if (askFirst) {
-            pendingUris = picked
-            mediaLocation.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
-        } else {
-            viewModel.open(picked, keepOrientation)
-        }
+    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
+        viewModel.open(it, SaveMode.REPLACE, keepOrientation)
     }
     val writeConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         viewModel.onWriteConsent(it.resultCode == Activity.RESULT_OK)
+    }
+    val photoRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+    // Without it we only ever see GPS-redacted bytes, and writing those back would erase locations
+    // the user chose to keep. So no permission, no in-place replace.
+    val mediaLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            documentPicker.launch(arrayOf("image/*"))
+        } else {
+            saveMode = SaveMode.COPY
+            Prefs.setSaveMode(context, SaveMode.COPY)
+            Toast.makeText(context, "Replacing needs media location access. Saving copies instead.", Toast.LENGTH_LONG).show()
+            photoPicker.launch(photoRequest)
+        }
     }
 
     BackHandler(enabled = state !is CleanState.Idle && state !is CleanState.Working, onBack = viewModel::reset)
@@ -143,12 +149,22 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
             CleanState.Idle -> HomeScreen(
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
+                saveMode = saveMode,
+                onSaveModeChange = {
+                    saveMode = it
+                    Prefs.setSaveMode(context, it)
+                },
                 keepOrientation = keepOrientation,
                 onKeepOrientationChange = {
                     keepOrientation = it
                     Prefs.setKeepOrientation(context, it)
                 },
-                onChoosePhotos = { documentPicker.launch(arrayOf("image/*")) },
+                onChoosePhotos = {
+                    when (saveMode) {
+                        SaveMode.COPY -> photoPicker.launch(photoRequest)
+                        SaveMode.REPLACE -> mediaLocation.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                    }
+                },
             )
             is CleanState.Working -> WorkingScreen(current.done, current.total)
             is CleanState.Inspecting -> InspectScreen(
@@ -163,7 +179,7 @@ private fun App(viewModel: CleanViewModel, themeMode: ThemeMode, onThemeModeChan
             is CleanState.Done -> ResultsScreen(
                 state = current,
                 onClose = viewModel::reset,
-                onSave = { mode -> viewModel.save(mode)?.let { writeConsent.launch(IntentSenderRequest.Builder(it).build()) } },
+                onSave = { viewModel.save()?.let { writeConsent.launch(IntentSenderRequest.Builder(it).build()) } },
                 onShare = { context.startActivity(context.shareIntent(current.cleaned)) },
             )
         }

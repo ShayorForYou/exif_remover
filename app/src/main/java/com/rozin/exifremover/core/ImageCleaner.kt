@@ -33,11 +33,6 @@ sealed interface CleanResult {
         val hadLocation: Boolean,
         /** True when the format had no lossless path (e.g. HEIC) and was converted to JPEG. */
         val reencoded: Boolean,
-        /**
-         * False when kept data may be Android's GPS-redacted copy (read without media-location access,
-         * location not removed). Writing that over the original would erase a location the user kept.
-         */
-        val safeToReplace: Boolean = true,
     ) : CleanResult
 
     data class Failed(override val source: Uri, val reason: String) : CleanResult
@@ -83,7 +78,6 @@ class ImageCleaner(private val context: Context) {
     /** Removes only [tags], leaving everything else (and the pixels) untouched. */
     suspend fun removeTags(uri: Uri, tags: Set<String>): CleanResult = withContext(Dispatchers.IO) {
         try {
-            val unredacted = canReadOriginal(uri)
             val bytes = readBytes(uri)
             val format = MetadataStripper.detect(bytes)
                 ?: throw IllegalStateException("This format can only be cleaned completely")
@@ -94,10 +88,7 @@ class ImageCleaner(private val context: Context) {
                 saveAttributes()
             }
             val removedLocation = ExifInterface.TAG_GPS_LATITUDE in tags
-            CleanResult.Cleaned(
-                uri, out, format.mimeType, bytes.size.toLong(), removedLocation, reencoded = false,
-                safeToReplace = unredacted || removedLocation,
-            )
+            CleanResult.Cleaned(uri, out, format.mimeType, bytes.size.toLong(), removedLocation, reencoded = false)
         } catch (e: Exception) {
             CleanResult.Failed(uri, e.message ?: e.javaClass.simpleName)
         }
@@ -112,14 +103,12 @@ class ImageCleaner(private val context: Context) {
      * Reading the unredacted bytes matters when replacing in place with some fields kept.
      */
     private fun openOriginal(uri: Uri): InputStream? {
-        if (!canReadOriginal(uri)) return null
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
         val media = context.mediaStoreUri(uri) ?: return null
         return runCatching { context.contentResolver.openInputStream(MediaStore.setRequireOriginal(media)) }.getOrNull()
     }
-
-    private fun canReadOriginal(uri: Uri): Boolean =
-        context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED &&
-            context.mediaStoreUri(uri) != null
 
     private fun cleanOne(uri: Uri, keepOrientation: Boolean): CleanResult = try {
         val bytes = readBytes(uri)

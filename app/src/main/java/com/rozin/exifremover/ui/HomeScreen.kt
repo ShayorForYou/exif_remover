@@ -3,6 +3,7 @@ package com.rozin.exifremover.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.outlined.BrightnessAuto
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.LightMode
@@ -30,11 +32,13 @@ import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,12 +53,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.rozin.exifremover.core.GALLERY_FOLDER
+import com.rozin.exifremover.core.SaveMode
 import com.rozin.exifremover.core.ThemeMode
 
 @Composable
 fun HomeScreen(
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
+    saveMode: SaveMode,
+    onSaveModeChange: (SaveMode) -> Unit,
     keepOrientation: Boolean,
     onKeepOrientationChange: (Boolean) -> Unit,
     onChoosePhotos: () -> Unit,
@@ -96,15 +104,44 @@ fun HomeScreen(
         }
         Spacer(Modifier.height(10.dp))
         Text(
-            "One photo to review its details, or several to clean at once. " +
-                "You choose to save a copy or replace the original afterwards.",
+            "One photo to review its details, or several to clean at once.",
             style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
 
-        SectionLabel("Options")
+        SectionLabel("Saving")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OptionCard(
+                icon = Icons.Outlined.ContentCopy,
+                title = "Save a copy",
+                subtitle = "Keep the original",
+                selected = saveMode == SaveMode.COPY,
+                onClick = { onSaveModeChange(SaveMode.COPY) },
+                modifier = Modifier.weight(1f),
+            )
+            OptionCard(
+                icon = Icons.Outlined.SwapHoriz,
+                title = "Replace",
+                subtitle = "Clean it in place",
+                selected = saveMode == SaveMode.REPLACE,
+                onClick = { onSaveModeChange(SaveMode.REPLACE) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            if (saveMode == SaveMode.COPY) {
+                "Copies are saved to Pictures/$GALLERY_FOLDER."
+            } else {
+                "Android asks before each edit. HEIC and cloud photos are saved as copies."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(top = 10.dp, start = 2.dp),
+        )
+
+        HorizontalDivider(Modifier.padding(vertical = 20.dp), color = colors.outlineVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.ScreenRotation, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
             Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
@@ -180,6 +217,53 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 2.dp, top = 36.dp, bottom = 12.dp),
     )
+}
+
+@Composable
+private fun OptionCard(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val borderColor by animateColorAsState(if (selected) colors.onSurface else colors.outlineVariant, label = "border")
+    Surface(
+        onClick = onClick,
+        modifier = modifier.border(if (selected) 1.5.dp else 1.dp, borderColor, MaterialTheme.shapes.medium),
+        shape = MaterialTheme.shapes.medium,
+        color = colors.surfaceContainerLow,
+    ) {
+        Box(Modifier.padding(14.dp)) {
+            Column {
+                Icon(
+                    icon, contentDescription = null,
+                    tint = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            RadioDot(selected, Modifier.align(Alignment.TopEnd))
+        }
+    }
+}
+
+@Composable
+private fun RadioDot(selected: Boolean, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Box(
+        modifier
+            .size(16.dp)
+            .clip(CircleShape)
+            .border(1.5.dp, if (selected) colors.onSurface else colors.outline, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) Box(Modifier.size(8.dp).clip(CircleShape).background(colors.onSurface))
+    }
 }
 
 @Composable

@@ -30,6 +30,7 @@ sealed interface CleanState {
 
     data class Inspecting(
         val inspection: Inspection,
+        val mode: SaveMode,
         val selected: Set<String>,
     ) : CleanState {
         val groups: Map<ExifGroup, List<ExifField>> get() = inspection.fields.groupBy { it.group }
@@ -38,8 +39,7 @@ sealed interface CleanState {
 
     data class Done(
         val results: List<CleanResult>,
-        /** How many originals can be overwritten in place; 0 disables "Replace original". */
-        val replaceable: Int,
+        val mode: SaveMode,
         val saving: Boolean = false,
         val saved: SaveOutcome? = null,
     ) : CleanState {
@@ -59,41 +59,34 @@ class CleanViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingReplace: Map<CleanResult.Cleaned, Uri> = emptyMap()
 
     /** One photo opens the details screen; several are cleaned in bulk straight away. */
-    fun open(uris: List<Uri>, keepOrientation: Boolean) {
+    fun open(uris: List<Uri>, mode: SaveMode, keepOrientation: Boolean) {
         when (uris.size) {
             0 -> Unit
-            1 -> inspect(uris[0])
-            else -> clean(uris, keepOrientation)
+            1 -> inspect(uris[0], mode)
+            else -> clean(uris, keepOrientation, mode)
         }
     }
 
-    fun clean(uris: List<Uri>, keepOrientation: Boolean) {
+    fun clean(uris: List<Uri>, keepOrientation: Boolean, mode: SaveMode = SaveMode.COPY) {
         if (uris.isEmpty() || _state.value is CleanState.Working) return
         _state.value = CleanState.Working(0, uris.size)
         viewModelScope.launch {
             val results = cleaner.clean(uris, keepOrientation) { done ->
                 _state.update { if (it is CleanState.Working) it.copy(done = maxOf(it.done, done)) else it }
             }
-            _state.value = done(results)
+            _state.value = CleanState.Done(results, mode)
         }
     }
 
-    private suspend fun done(results: List<CleanResult>): CleanState.Done {
-        val replaceable = withContext(Dispatchers.IO) {
-            app.replaceTargets(results.filterIsInstance<CleanResult.Cleaned>()).size
-        }
-        return CleanState.Done(results, replaceable)
-    }
-
-    private fun inspect(uri: Uri) {
+    private fun inspect(uri: Uri, mode: SaveMode) {
         _state.value = CleanState.Working(0, 1)
         viewModelScope.launch {
             _state.value = runCatching { cleaner.inspect(uri) }.fold(
                 onSuccess = { inspection ->
                     val preselected = inspection.fields.filter { it.sensitive }.map { it.id }.toSet()
-                    CleanState.Inspecting(inspection, preselected)
+                    CleanState.Inspecting(inspection, mode, preselected)
                 },
-                onFailure = { done(listOf(CleanResult.Failed(uri, it.message ?: "Couldn't read photo"))) },
+                onFailure = { CleanState.Done(listOf(CleanResult.Failed(uri, it.message ?: "Couldn't read photo")), mode) },
             )
         }
     }
@@ -120,24 +113,24 @@ class CleanViewModel(application: Application) : AndroidViewModel(application) {
         if (tags.isEmpty()) return
         _state.value = CleanState.Working(0, 1)
         viewModelScope.launch {
-            _state.value = done(listOf(cleaner.removeTags(inspecting.inspection.source, tags)))
+            _state.value = CleanState.Done(listOf(cleaner.removeTags(inspecting.inspection.source, tags)), inspecting.mode)
         }
     }
 
     fun removeAll(keepOrientation: Boolean) {
         val inspecting = _state.value as? CleanState.Inspecting ?: return
         _state.value = CleanState.Idle
-        clean(listOf(inspecting.inspection.source), keepOrientation)
+        clean(listOf(inspecting.inspection.source), keepOrientation, inspecting.mode)
     }
 
     /**
-     * Saves as copies, or replaces the originals where possible (the rest become copies).
-     * Returns the consent dialog to launch when replacing; report its outcome to [onWriteConsent].
+     * Starts saving. Returns the consent dialog to launch when originals are being replaced;
+     * report its outcome to [onWriteConsent].
      */
-    fun save(mode: SaveMode): IntentSender? {
+    fun save(): IntentSender? {
         val done = _state.value as? CleanState.Done ?: return null
         if (done.saving || done.saved != null) return null
-        if (mode == SaveMode.REPLACE) {
+        if (done.mode == SaveMode.REPLACE) {
             val targets = app.replaceTargets(done.cleaned)
             if (targets.isNotEmpty()) {
                 pendingReplace = targets
