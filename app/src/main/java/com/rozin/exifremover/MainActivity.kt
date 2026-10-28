@@ -1,9 +1,13 @@
 package com.rozin.exifremover
 
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.graphics.Color
+import android.window.SplashScreenView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -12,9 +16,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.annotation.RequiresApi
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -58,6 +62,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) splashScreen.setOnExitAnimationListener(::exitSplash)
         if (savedInstanceState == null) openShared(intent)
         setContent {
             var themeMode by remember { mutableStateOf(Prefs.themeMode(this)) }
@@ -88,6 +93,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Lets the splash icon animation (res/drawable/splash_icon.xml, under a second) play out instead of being cut off
+     * when the app is ready first, then zooms the icon away as the splash fades into the app.
+     */
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun exitSplash(splash: SplashScreenView) {
+        val start = splash.iconAnimationStart?.toEpochMilli()
+        val duration = splash.iconAnimationDuration?.toMillis() ?: 0L
+        // The start time is on the uptime clock. With animations turned off in system settings, don't wait at all.
+        val remaining = if (start != null && ValueAnimator.areAnimatorsEnabled()) {
+            (start + duration - SystemClock.uptimeMillis()).coerceIn(0L, duration)
+        } else {
+            0L
+        }
+        splash.iconView?.animate()
+            ?.scaleX(1.15f)?.scaleY(1.15f)
+            ?.setStartDelay(remaining)?.setDuration(SPLASH_EXIT_MS)
+            ?.start()
+        splash.animate()
+            .alpha(0f)
+            .setStartDelay(remaining).setDuration(SPLASH_EXIT_MS)
+            .withEndAction(splash::remove)
+            .start()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         openShared(intent)
@@ -106,6 +136,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private const val MAX_PICK = 100
+private const val SPLASH_EXIT_MS = 250L
 
 /** The in-app gallery sits in front of the home screen, before any cleaning state exists. */
 private object GalleryRoute
@@ -124,19 +155,16 @@ private fun App(
     var keepOrientation by remember { mutableStateOf(Prefs.keepOrientation(context)) }
     var picking by rememberSaveable { mutableStateOf(false) }
 
-    // "Save a copy": the system photo picker. Its URIs are read-only stand-ins, fine for making copies.
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_PICK)) {
-        viewModel.open(it, SaveMode.COPY, keepOrientation)
-    }
-    // "Replace" fallback when photo access is denied: document URIs map back to the real MediaStore rows.
+    // Fallback when photo access is denied: document URIs map back to the real MediaStore rows.
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
-        viewModel.open(it, SaveMode.REPLACE, keepOrientation)
+        viewModel.open(it, saveMode, keepOrientation)
     }
     val writeConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         viewModel.onWriteConsent(it.resultCode == Activity.RESULT_OK)
     }
-    val photoRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-    // "Replace": the in-app gallery lists real MediaStore rows, which can be edited in place after consent.
+    // Both modes use the in-app gallery, not the system photo picker: the picker strips GPS from what it hands
+    // out, so the details screen could never show the location. Gallery items are real MediaStore rows, which
+    // reveal it (with media location access) and can be edited in place after consent.
     // Re-requesting from inside the gallery is how Android 14+ users add more photos to limited access.
     val libraryAccess = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (MediaLibrary.access(context) == LibraryAccess.NONE) {
@@ -149,7 +177,9 @@ private fun App(
         }
     }
     fun openGallery() {
-        if (MediaLibrary.access(context) == LibraryAccess.NONE) {
+        // Also re-ask when only media location is missing (e.g. photo access was granted by an older build).
+        // Once the user has declined twice, Android answers immediately without a dialog.
+        if (MediaLibrary.access(context) == LibraryAccess.NONE || !MediaLibrary.hasLocationAccess(context)) {
             libraryAccess.launch(MediaLibrary.permissions())
         } else {
             gallery.refresh()
@@ -174,6 +204,7 @@ private fun App(
         when (current) {
             GalleryRoute -> GalleryScreen(
                 state = galleryState,
+                saveMode = saveMode,
                 onBack = ::closeGallery,
                 onAlbum = gallery::selectAlbum,
                 onToggle = { gallery.toggle(it.uri) },
@@ -183,7 +214,7 @@ private fun App(
                 onClean = {
                     val uris = galleryState.selected.toList()
                     closeGallery()
-                    viewModel.open(uris, SaveMode.REPLACE, keepOrientation)
+                    viewModel.open(uris, saveMode, keepOrientation)
                 },
             )
             CleanState.Idle -> HomeScreen(
@@ -199,12 +230,7 @@ private fun App(
                     keepOrientation = it
                     Prefs.setKeepOrientation(context, it)
                 },
-                onChoosePhotos = {
-                    when (saveMode) {
-                        SaveMode.COPY -> photoPicker.launch(photoRequest)
-                        SaveMode.REPLACE -> openGallery()
-                    }
-                },
+                onChoosePhotos = ::openGallery,
             )
             is CleanState.Working -> WorkingScreen(current.done, current.total)
             is CleanState.Inspecting -> InspectScreen(

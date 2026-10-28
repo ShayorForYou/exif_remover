@@ -41,6 +41,9 @@ object MediaLibrary {
         else -> LibraryAccess.NONE
     }
 
+    /** Without this, Android zeroes the GPS values in every photo we read. */
+    fun hasLocationAccess(context: Context): Boolean = context.granted(Manifest.permission.ACCESS_MEDIA_LOCATION)
+
     /** Every visible photo, newest first. Only IDs and album names are read, so even large libraries load quickly. */
     fun load(context: Context): List<LibraryPhoto> {
         val projection = arrayOf(

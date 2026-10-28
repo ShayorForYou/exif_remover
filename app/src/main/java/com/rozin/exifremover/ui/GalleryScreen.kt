@@ -54,11 +54,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.rozin.exifremover.core.LibraryAccess
 import com.rozin.exifremover.core.LibraryPhoto
+import com.rozin.exifremover.core.SaveMode
 
-/** In-app photo grid for "Replace original": albums, multi-select, then clean the chosen originals in place. */
+/** In-app photo grid: albums, multi-select, then clean the chosen photos as copies or in place. */
 @Composable
 fun GalleryScreen(
     state: GalleryState,
+    saveMode: SaveMode,
     onBack: () -> Unit,
     onAlbum: (String?) -> Unit,
     onToggle: (LibraryPhoto) -> Unit,
@@ -78,7 +80,10 @@ fun GalleryScreen(
                 Text("Choose photos", style = MaterialTheme.typography.titleLarge)
                 Text(
                     when {
-                        state.selected.isEmpty() -> "Originals are cleaned in place"
+                        state.selected.isEmpty() -> when (saveMode) {
+                            SaveMode.COPY -> "Clean copies are saved separately"
+                            SaveMode.REPLACE -> "Originals are cleaned in place"
+                        }
                         state.atLimit -> "${state.selected.size} selected · limit reached"
                         else -> "${state.selected.size} selected"
                     },
