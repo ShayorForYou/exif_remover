@@ -5,5 +5,9 @@
 .DS_Store
 /build
 /app/build
+# APKs from Android Studio's "Generate Signed APK"; releases are built by CI instead.
+/app/release
+*.jks
+*.keystore
 /captures
 .kotlin

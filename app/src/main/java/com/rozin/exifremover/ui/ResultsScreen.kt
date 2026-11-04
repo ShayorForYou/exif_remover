@@ -1,10 +1,13 @@
 package com.rozin.exifremover.ui
 
+import android.net.Uri
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,20 +31,24 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.LocationOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,7 +62,7 @@ import com.rozin.exifremover.core.CleanResult
 import com.rozin.exifremover.core.GALLERY_FOLDER
 import com.rozin.exifremover.core.SaveMode
 import com.rozin.exifremover.core.SaveOutcome
-import kotlinx.coroutines.delay
+import com.rozin.exifremover.core.StripLevel
 
 @Composable
 fun ResultsScreen(
@@ -63,23 +70,22 @@ fun ResultsScreen(
     onClose: () -> Unit,
     onSave: () -> Unit,
     onShare: () -> Unit,
+    onSaveCopies: () -> Unit,
+    onRetry: () -> Unit,
+    onOpen: (CleanResult) -> Unit,
+    onCloseDetail: () -> Unit,
+    onView: (Uri) -> Unit,
 ) {
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
     val cleaned = state.cleaned
     val single = state.results.size == 1
-    val located = cleaned.count { it.hadLocation }
-    val removedBytes = cleaned.sumOf { it.removedBytes }
+    val located = remember(cleaned) { cleaned.count { it.hadLocation } }
+    val removedBytes = remember(cleaned) { cleaned.sumOf { it.removedBytes } }
+    val options = state.settings.strip
+    val locationOnly = options.level == StripLevel.LOCATION
 
-    // A clean save is the end of the flow: show the confirmation briefly, then head home.
-    // On partial failure, stay so the message can be read.
-    LaunchedEffect(state.saved) {
-        val saved = state.saved ?: return@LaunchedEffect
-        if (saved.failed == 0) {
-            delay(SAVED_RETURN_DELAY_MS)
-            onClose()
-        }
-    }
+    state.detail?.let { DetailSheet(it, onDismiss = onCloseDetail, onRetry = onRetry.takeIf { state.saved == null }) }
 
     Column(Modifier.fillMaxSize().background(colors.background)) {
         LazyVerticalGrid(
@@ -95,14 +101,23 @@ fun ResultsScreen(
                         Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(22.dp))
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text(if (cleaned.isEmpty()) "Nothing cleaned" else "All clean", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        when {
+                            cleaned.isEmpty() -> "Nothing cleaned"
+                            locationOnly -> "Location removed"
+                            else -> "All clean"
+                        },
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         when {
                             cleaned.isEmpty() -> "None of the photos could be cleaned."
+                            locationOnly && located > 0 -> "GPS data is gone. Camera details and dates were kept."
+                            locationOnly -> "No GPS data found. Camera details and dates were kept."
                             located > 0 -> "Location, camera and personal details have been removed."
                             else -> "Camera and personal details have been removed."
-                        },
+                        } + if (!locationOnly && options.keepDate && cleaned.isNotEmpty()) " The date taken was kept." else "",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
                     )
@@ -134,7 +149,34 @@ fun ResultsScreen(
 
             item(span = { GridItemSpan(maxLineSpan) }) {
                 AnimatedVisibility(state.saved != null) {
-                    state.saved?.let { Notice(Icons.Rounded.Done, it.describe(), error = it.failed > 0) }
+                    state.saved?.let { saved ->
+                        Notice(
+                            if (saved.trashed) Icons.Rounded.DeleteOutline else Icons.Rounded.Done,
+                            saved.describe(),
+                            error = saved.failed > 0,
+                            action = saved.first?.let { first ->
+                                {
+                                    TextButton(onClick = { onView(first) }) {
+                                        Text("View", color = if (saved.failed > 0) colors.onErrorContainer else colors.onSurface)
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+            if (state.consentDenied && state.saved == null) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Notice(
+                        Icons.Rounded.ErrorOutline,
+                        "Originals weren't changed. Allow the edit to replace them, or keep them and save copies.",
+                        error = true,
+                        action = {
+                            TextButton(onClick = onSaveCopies, enabled = !state.saving) {
+                                Text("Save copies instead", color = colors.onErrorContainer)
+                            }
+                        },
+                    )
                 }
             }
             if (state.failed.isNotEmpty()) {
@@ -143,6 +185,12 @@ fun ResultsScreen(
                         Icons.Rounded.ErrorOutline,
                         "${state.failed.size} couldn't be cleaned: ${state.failed.first().reason}",
                         error = true,
+                        // Once saved, a retry's new copies would never be saved, so it's only offered before.
+                        action = if (state.saved == null) {
+                            { RetryButton(state.retrying, onRetry) }
+                        } else {
+                            null
+                        },
                     )
                 }
             }
@@ -156,7 +204,7 @@ fun ResultsScreen(
                 )
             }
             items(state.results) { result ->
-                ResultTile(result, Modifier.fillMaxWidth().aspectRatio(1f))
+                ResultTile(result, Modifier.fillMaxWidth().aspectRatio(1f).clickable { onOpen(result) })
             }
         }
 
@@ -174,17 +222,18 @@ fun ResultsScreen(
                 ) {
                     Text("Share", color = colors.onSurface)
                 }
+                // Saving no longer leaves the screen by itself, so Share stays one tap away; "Done" closes it.
                 Button(
-                    onClick = onSave,
-                    enabled = !state.saving && state.saved == null,
+                    onClick = if (state.saved != null) onClose else onSave,
+                    enabled = !state.saving && !state.retrying,
                     modifier = Modifier.weight(1f).height(52.dp),
                     shape = MaterialTheme.shapes.medium,
                 ) {
                     when {
                         state.saving -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        state.saved != null -> Text("Saved")
+                        state.saved != null -> Text("Done")
                         else -> {
-                            val replace = state.mode == SaveMode.REPLACE
+                            val replace = state.settings.saveMode == SaveMode.REPLACE
                             Text(
                                 when {
                                     replace && single -> "Replace original"
@@ -201,10 +250,10 @@ fun ResultsScreen(
     }
 }
 
-private const val SAVED_RETURN_DELAY_MS = 1400L
-
 private fun SaveOutcome.describe(): String = buildList {
-    if (replaced > 0) add("$replaced original${if (replaced == 1) "" else "s"} replaced")
+    if (replaced > 0) {
+        add("$replaced original${if (replaced == 1) "" else "s"} replaced" + if (trashed) " (old ones in Trash for 30 days)" else "")
+    }
     if (copied > 0) add("$copied saved to Pictures/$GALLERY_FOLDER")
     if (failed > 0) add("$failed failed")
 }.joinToString(" · ").ifEmpty { "Nothing was saved" }
@@ -225,22 +274,118 @@ private fun Stat(value: String, label: String, valueColor: Color, modifier: Modi
 }
 
 @Composable
-private fun Notice(icon: ImageVector, text: String, error: Boolean) {
+private fun Notice(icon: ImageVector, text: String, error: Boolean, action: (@Composable () -> Unit)? = null) {
     val colors = MaterialTheme.colorScheme
     val content = if (error) colors.error else colors.onSurfaceVariant
-    Row(
+    Column(
         Modifier
             .padding(top = 12.dp)
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.medium)
             .background(if (error) colors.errorContainer else colors.surfaceContainer)
             .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, tint = content, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(12.dp))
-        Text(text, style = MaterialTheme.typography.bodySmall, color = if (error) colors.onErrorContainer else colors.onSurface)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null, tint = content, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall, color = if (error) colors.onErrorContainer else colors.onSurface)
+        }
+        if (action != null) Box(Modifier.align(Alignment.End).offset(x = 8.dp)) { action() }
     }
+}
+
+@Composable
+private fun RetryButton(retrying: Boolean, onRetry: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    TextButton(onClick = onRetry, enabled = !retrying) {
+        if (retrying) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.onErrorContainer)
+        } else {
+            Text("Retry", color = colors.onErrorContainer)
+        }
+    }
+}
+
+/** What one photo lost and kept, or why it couldn't be cleaned. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DetailSheet(detail: Detail, onDismiss: () -> Unit, onRetry: (() -> Unit)?) {
+    val colors = MaterialTheme.colorScheme
+    val result = detail.result
+    val comparison = detail.comparison
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
+        LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp)) {
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Same key as the grid tile, so this comes straight from the thumbnail cache.
+                    Thumbnail(
+                        if (result is CleanResult.Cleaned) result.file else result.source,
+                        maxPx = 320,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .border(1.dp, colors.outlineVariant, MaterialTheme.shapes.small),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Column {
+                        Text(
+                            when {
+                                result is CleanResult.Failed -> "Couldn't clean this photo"
+                                comparison == null -> "Reading details…"
+                                comparison.removed.isEmpty() -> "No EXIF details found"
+                                comparison.removed.size == 1 -> "1 detail removed"
+                                else -> "${comparison.removed.size} details removed"
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        if (result is CleanResult.Cleaned) {
+                            Text(
+                                Formatter.formatShortFileSize(LocalContext.current, result.removedBytes) + " of metadata removed",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            when {
+                result is CleanResult.Failed -> item {
+                    Notice(
+                        Icons.Rounded.ErrorOutline, result.reason, error = true,
+                        action = onRetry?.let { retry -> { RetryButton(retrying = false) { retry(); onDismiss() } } },
+                    )
+                }
+                comparison == null -> item {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    }
+                }
+                else -> {
+                    if (comparison.removed.isNotEmpty()) {
+                        item { SheetSection("Removed") }
+                        item { FieldCard(comparison.removed) }
+                    }
+                    if (comparison.kept.isNotEmpty()) {
+                        item { SheetSection("Kept") }
+                        item { FieldCard(comparison.kept) }
+                    }
+                    if (comparison.removed.isEmpty() && comparison.kept.isEmpty()) {
+                        item { Notice(Icons.Rounded.Done, "Any other hidden blocks (XMP, vendor data) were still cleared.", error = false) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetSection(title: String) {
+    Text(
+        title.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 24.dp, bottom = 8.dp),
+    )
 }
 
 @Composable
@@ -273,7 +418,7 @@ private fun ResultTile(result: CleanResult, modifier: Modifier) {
 }
 
 @Composable
-fun WorkingScreen(done: Int, total: Int) {
+fun WorkingScreen(done: Int, total: Int, onCancel: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(32.dp),
         verticalArrangement = Arrangement.Center,
@@ -301,5 +446,8 @@ fun WorkingScreen(done: Int, total: Int) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(24.dp))
+        // Nothing is saved until the results screen, so stopping here leaves every original untouched.
+        TextButton(onClick = onCancel) { Text("Cancel", color = MaterialTheme.colorScheme.onSurface) }
     }
 }

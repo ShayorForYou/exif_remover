@@ -44,6 +44,21 @@ private val thumbnailCache = object : LruCache<String, ImageBitmap>((Runtime.get
     override fun sizeOf(key: String, value: ImageBitmap) = value.asAndroidBitmap().byteCount
 }
 
+/**
+ * Plain Dispatchers.IO runs up to 64 decodes at once: a results grid of fresh full-size files then saturates every
+ * core, starving the UI thread (felt as jank when leaving the screen while they're still in flight).
+ */
+private val decodeDispatcher = Dispatchers.IO.limitedParallelism(3)
+
+/** Drops cached thumbnails of files that are being deleted; their random names mean they'd never be hit again. */
+fun evictThumbnails(files: Collection<File>) {
+    if (files.isEmpty()) return
+    val paths = files.mapTo(HashSet()) { it.toString() }
+    thumbnailCache.snapshot().keys
+        .filter { it.substringBeforeLast('@') in paths }
+        .forEach { thumbnailCache.remove(it) }
+}
+
 /** Downsampled image from a content [Uri] or a [File], decoded off the main thread and cached. */
 @Composable
 fun Thumbnail(
@@ -56,7 +71,8 @@ fun Thumbnail(
     val key = "$source@$maxPx"
     val bitmap by produceState(thumbnailCache.get(key), key) {
         if (value == null) {
-            value = withContext(Dispatchers.IO) { runCatching { decode(context, source, maxPx) }.getOrNull() }
+            // Queued decodes for tiles that scrolled away or left with their screen are skipped, not run.
+            value = withContext(decodeDispatcher) { runCatching { decode(context, source, maxPx) }.getOrNull() }
                 ?.also { thumbnailCache.put(key, it) }
         }
     }

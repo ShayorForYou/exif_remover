@@ -13,7 +13,6 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
-import androidx.core.content.edit
 import com.rozin.exifremover.MainActivity
 import com.rozin.exifremover.ShareActivity
 
@@ -51,28 +50,95 @@ fun Context.shareIntent(images: List<CleanResult.Cleaned>): Intent {
 
 const val GALLERY_FOLDER = "EXIF Remover"
 
-/** Copies cleaned images into Pictures/EXIF Remover. Returns how many were saved. */
-fun Context.saveToGallery(images: List<CleanResult.Cleaned>): Int {
-    val resolver = contentResolver
-    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-    return images.count { image ->
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, image.file.name)
-            put(MediaStore.Images.Media.MIME_TYPE, image.mimeType)
-            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$GALLERY_FOLDER")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-        val uri = resolver.insert(collection, values) ?: return@count false
-        runCatching {
-            resolver.openOutputStream(uri)!!.use { out -> image.file.inputStream().use { it.copyTo(out) } }
-            resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
-        }.onFailure { resolver.delete(uri, null, null) }.isSuccess
-    }
+data class SaveOutcome(
+    val replaced: Int,
+    val copied: Int,
+    val failed: Int,
+    /** Originals went to the system Trash (restorable for 30 days) rather than being overwritten. */
+    val trashed: Boolean = false,
+    /** One of the saved photos, for opening it in a gallery app. */
+    val first: Uri? = null,
+)
+
+/** A cleaned photo already written next to its original, hidden (pending) until the original is in the Trash. */
+class StagedCopy(val image: CleanResult.Cleaned, val original: Uri, val copy: Uri, val name: String)
+
+/**
+ * How a batch will be saved. Everything slow (finding originals, writing staged copies) happens while building it,
+ * off the main thread; [consent] is the one system dialog the user must accept before [execute] may run.
+ */
+class SavePlan(
+    val copies: List<CleanResult.Cleaned>,
+    val overwrite: Map<CleanResult.Cleaned, Uri> = emptyMap(),
+    val staged: List<StagedCopy> = emptyList(),
+    val consent: IntentSender? = null,
+) {
+    val trashing get() = staged.isNotEmpty()
 }
 
-enum class SaveMode { COPY, REPLACE }
+/** Works out where each image goes. Blocking: call off the main thread. */
+fun Context.planSave(images: List<CleanResult.Cleaned>, settings: Settings): SavePlan {
+    if (settings.saveMode == SaveMode.COPY) return SavePlan(images)
+    val targets = replaceTargets(images)
+    if (targets.isEmpty()) return SavePlan(images)
+    if (settings.trashOriginals) {
+        val staged = stageCopies(targets)
+        val request = staged.takeIf { it.isNotEmpty() }?.let { trashRequest(it.map(StagedCopy::original)) }
+        if (request == null) {
+            discardStaged(staged)
+            return SavePlan(images)
+        }
+        val stagedImages = staged.mapTo(HashSet()) { it.image }
+        return SavePlan(images.filterNot { it in stagedImages }, staged = staged, consent = request)
+    }
+    // No consent dialog: fall through and save everything as copies.
+    val request = writeRequest(targets.values) ?: return SavePlan(images)
+    return SavePlan(images.filterNot { it in targets }, overwrite = targets, consent = request)
+}
 
-data class SaveOutcome(val replaced: Int, val copied: Int, val failed: Int)
+/** Carries out [plan] once its consent (if any) was granted. Blocking: call off the main thread. */
+fun Context.execute(plan: SavePlan): SaveOutcome {
+    val overwritten = overwriteOriginals(plan.overwrite)
+    val published = publishStaged(plan.staged)
+    val copied = saveToGallery(plan.copies)
+    val total = plan.copies.size + plan.overwrite.size + plan.staged.size
+    val replaced = overwritten.size + published.size
+    return SaveOutcome(
+        replaced = replaced,
+        copied = copied.size,
+        failed = total - replaced - copied.size,
+        trashed = published.isNotEmpty(),
+        first = (published + overwritten + copied).firstOrNull(),
+    )
+}
+
+/** Undoes the parts of [plan] written ahead of consent, after the user declined it. */
+fun Context.abandon(plan: SavePlan) = discardStaged(plan.staged)
+
+/** Copies cleaned images into Pictures/EXIF Remover. Returns the saved items. */
+private fun Context.saveToGallery(images: List<CleanResult.Cleaned>): List<Uri> = images.mapNotNull { image ->
+    insertImage(image, MediaStore.VOLUME_EXTERNAL_PRIMARY, "${Environment.DIRECTORY_PICTURES}/$GALLERY_FOLDER", publish = true)
+}
+
+/**
+ * Writes [image] as a new MediaStore item. Unless [publish], it stays pending: invisible to other apps, and
+ * removed by the system after about a week if never published, so an interrupted save leaves nothing behind.
+ */
+private fun Context.insertImage(image: CleanResult.Cleaned, volume: String, relativePath: String, publish: Boolean): Uri? {
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, image.file.name)
+        put(MediaStore.Images.Media.MIME_TYPE, image.mimeType)
+        put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val uri = runCatching { contentResolver.insert(MediaStore.Images.Media.getContentUri(volume), values) }.getOrNull()
+        ?: return null
+    return runCatching {
+        contentResolver.openOutputStream(uri)!!.use { out -> image.file.inputStream().use { it.copyTo(out) } }
+        if (publish) contentResolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+        uri
+    }.onFailure { contentResolver.delete(uri, null, null) }.getOrNull()
+}
 
 /**
  * The MediaStore row behind a picked image, which is what we need to overwrite it.
@@ -100,10 +166,10 @@ private fun asImageItem(uri: Uri): Uri {
 }
 
 /**
- * Originals that can be overwritten in place. Images converted to JPEG (GIF, BMP…) can't: the format differs.
+ * Originals that can be replaced. Images converted to JPEG (GIF, BMP…) can't: the format differs.
  * Nor can files Android doesn't index as photos (e.g. inside an app's private folder); those are saved as copies.
  */
-fun Context.replaceTargets(images: List<CleanResult.Cleaned>): Map<CleanResult.Cleaned, Uri> {
+private fun Context.replaceTargets(images: List<CleanResult.Cleaned>): Map<CleanResult.Cleaned, Uri> {
     val candidates = images.filterNot { it.reencoded }
         .mapNotNull { image -> mediaStoreUri(image.source)?.let { image to it } }
         .toMap()
@@ -116,37 +182,79 @@ private fun Context.canRequestWrite(uris: Collection<Uri>) =
     runCatching { MediaStore.createWriteRequest(contentResolver, uris) }.isSuccess
 
 /** System "Allow EXIF Remover to modify these photos?" dialog, or null if Android refuses to build one. */
-fun Context.writeRequest(uris: Collection<Uri>): IntentSender? =
+private fun Context.writeRequest(uris: Collection<Uri>): IntentSender? =
     runCatching { MediaStore.createWriteRequest(contentResolver, uris).intentSender }.getOrNull()
 
+/** System "Move these photos to Trash?" dialog. Accepting it is what trashes them. */
+private fun Context.trashRequest(uris: Collection<Uri>): IntentSender? =
+    runCatching { MediaStore.createTrashRequest(contentResolver, uris, true).intentSender }.getOrNull()
+
 /** Overwrites each original with its cleaned bytes (after the user granted [writeRequest]). */
-fun Context.overwriteOriginals(targets: Map<CleanResult.Cleaned, Uri>): Int = targets.count { (image, uri) ->
-    runCatching {
-        contentResolver.openOutputStream(uri, "wt")!!.use { out -> image.file.inputStream().use { it.copyTo(out) } }
-    }.isSuccess
+private fun Context.overwriteOriginals(targets: Map<CleanResult.Cleaned, Uri>): List<Uri> =
+    targets.mapNotNull { (image, uri) ->
+        runCatching {
+            // Source first: "wt" empties the original on open, so it must never be opened if there's nothing to copy.
+            image.file.inputStream().use { input -> contentResolver.openOutputStream(uri, "wt")!!.use { input.copyTo(it) } }
+            uri
+        }.getOrNull()
+    }
+
+/**
+ * Writes each cleaned image, still hidden, into its original's folder and volume. Originals whose copy can't be
+ * written there (e.g. folders apps may not add photos to) are left out, so they're never trashed without one.
+ */
+private fun Context.stageCopies(targets: Map<CleanResult.Cleaned, Uri>): List<StagedCopy> {
+    val places = originalPlaces(targets.values)
+    return targets.mapNotNull { (image, original) ->
+        val place = places[ContentUris.parseId(original)] ?: return@mapNotNull null
+        val copy = insertImage(image, place.volume, place.relativePath, publish = false) ?: return@mapNotNull null
+        StagedCopy(image, original, copy, place.name)
+    }
 }
 
-enum class ThemeMode { SYSTEM, LIGHT, DARK }
-
-object Prefs {
-    private const val KEY_KEEP_ORIENTATION = "keep_orientation"
-    private const val KEY_SAVE_MODE = "save_mode"
-    private const val KEY_THEME_MODE = "theme_mode"
-
-    private fun Context.prefs() = getSharedPreferences("settings", Context.MODE_PRIVATE)
-
-    fun keepOrientation(context: Context) = context.prefs().getBoolean(KEY_KEEP_ORIENTATION, true)
-
-    fun setKeepOrientation(context: Context, keep: Boolean) =
-        context.prefs().edit { putBoolean(KEY_KEEP_ORIENTATION, keep) }
-
-    fun saveMode(context: Context): SaveMode =
-        runCatching { SaveMode.valueOf(context.prefs().getString(KEY_SAVE_MODE, null)!!) }.getOrDefault(SaveMode.COPY)
-
-    fun setSaveMode(context: Context, mode: SaveMode) = context.prefs().edit { putString(KEY_SAVE_MODE, mode.name) }
-
-    fun themeMode(context: Context): ThemeMode =
-        runCatching { ThemeMode.valueOf(context.prefs().getString(KEY_THEME_MODE, null)!!) }.getOrDefault(ThemeMode.SYSTEM)
-
-    fun setThemeMode(context: Context, mode: ThemeMode) = context.prefs().edit { putString(KEY_THEME_MODE, mode.name) }
+/** Gives each staged copy its original's name (free now that the original is in the Trash) and makes it visible. */
+private fun Context.publishStaged(staged: List<StagedCopy>): List<Uri> = staged.mapNotNull { item ->
+    val visible = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+    val renamed = ContentValues(visible).apply { put(MediaStore.Images.Media.DISPLAY_NAME, item.name) }
+    val ok = runCatching { contentResolver.update(item.copy, renamed, null, null) > 0 }.getOrDefault(false) ||
+        runCatching { contentResolver.update(item.copy, visible, null, null) > 0 }.getOrDefault(false)
+    item.copy.takeIf { ok }
 }
+
+private fun Context.discardStaged(staged: List<StagedCopy>) =
+    staged.forEach { runCatching { contentResolver.delete(it.copy, null, null) } }
+
+private class Place(val volume: String, val relativePath: String, val name: String)
+
+/** Volume, folder and file name of each original, by row ID, in one query per few hundred rows. */
+private fun Context.originalPlaces(originals: Collection<Uri>): Map<Long, Place> {
+    val projection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.VOLUME_NAME,
+        MediaStore.Images.Media.RELATIVE_PATH,
+        MediaStore.Images.Media.DISPLAY_NAME,
+    )
+    val places = HashMap<Long, Place>()
+    // Row IDs are unique across external volumes, so one collection covers SD cards too.
+    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+    originals.map(ContentUris::parseId).chunked(QUERY_CHUNK).forEach { ids ->
+        val selection = "${MediaStore.Images.Media._ID} IN (${ids.joinToString(",")})"
+        runCatching {
+            contentResolver.query(collection, projection, selection, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val path = c.getString(2) ?: continue
+                    val name = c.getString(3) ?: continue
+                    places[c.getLong(0)] = Place(c.getString(1), path, name)
+                }
+            }
+        }
+    }
+    return places
+}
+
+private const val QUERY_CHUNK = 400
+
+/** Opens a saved photo in whichever gallery app the user prefers. */
+fun Context.viewIntent(uri: Uri): Intent = Intent(Intent.ACTION_VIEW)
+    .setDataAndType(uri, contentResolver.getType(uri) ?: "image/*")
+    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)

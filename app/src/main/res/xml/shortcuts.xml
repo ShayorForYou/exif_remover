@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the launcher icon. The latest-photo shortcuts open the details screen, one tap from "Remove". -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:icon="@drawable/ic_shortcut_photo"
+        android:shortcutId="latest_photo"
+        android:shortcutLongLabel="@string/shortcut_latest_photo_long"
+        android:shortcutShortLabel="@string/shortcut_latest_photo">
+        <intent
+            android:action="com.rozin.exifremover.action.LATEST_PHOTO"
+            android:targetClass="com.rozin.exifremover.MainActivity"
+            android:targetPackage="com.rozin.exifremover" />
+    </shortcut>
+    <shortcut
+        android:icon="@drawable/ic_shortcut_screenshot"
+        android:shortcutId="latest_screenshot"
+        android:shortcutLongLabel="@string/shortcut_latest_screenshot_long"
+        android:shortcutShortLabel="@string/shortcut_latest_screenshot">
+        <intent
+            android:action="com.rozin.exifremover.action.LATEST_SCREENSHOT"
+            android:targetClass="com.rozin.exifremover.MainActivity"
+            android:targetPackage="com.rozin.exifremover" />
+    </shortcut>
+    <shortcut
+        android:icon="@drawable/ic_shortcut_gallery"
+        android:shortcutId="choose"
+        android:shortcutLongLabel="@string/shortcut_choose_long"
+        android:shortcutShortLabel="@string/shortcut_choose">
+        <intent
+            android:action="com.rozin.exifremover.action.CHOOSE"
+            android:targetClass="com.rozin.exifremover.MainActivity"
+            android:targetPackage="com.rozin.exifremover" />
+    </shortcut>
+</shortcuts>

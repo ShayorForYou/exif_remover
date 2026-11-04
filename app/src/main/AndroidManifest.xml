@@ -24,6 +24,10 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Long-press shortcuts: latest photo, latest screenshot, choose photos. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <!-- Share target that opens the full app: details for one image, bulk results for several. -->
             <intent-filter android:label="Review &amp; clean">
                 <action android:name="android.intent.action.SEND" />
@@ -55,6 +59,21 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
+
+        <!-- Quick Settings tile that opens the gallery picker. -->
+        <service
+            android:name=".CleanTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="false" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
