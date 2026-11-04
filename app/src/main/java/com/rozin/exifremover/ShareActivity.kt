@@ -42,7 +42,8 @@ class ShareActivity : ComponentActivity() {
                 finish()
                 return
             }
-            viewModel.clean(uris, Prefs.keepOrientation(this))
+            // Only the stripping choices apply: shared copies go to another app, never into the library.
+            viewModel.clean(uris, Prefs.settings(this))
         }
 
         setContent {
@@ -93,7 +94,10 @@ class ShareActivity : ComponentActivity() {
 
     private fun forward(cleaned: List<CleanResult.Cleaned>) {
         if (isFinishing) return
-        if (cleaned.isNotEmpty()) startActivity(shareIntent(cleaned))
+        if (cleaned.isNotEmpty()) {
+            viewModel.markShared()
+            startActivity(shareIntent(cleaned))
+        }
         finish()
     }
 }

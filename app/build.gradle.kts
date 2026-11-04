@@ -14,12 +14,38 @@ android {
         // 30: MediaStore.createWriteRequest, the consent dialog for replacing originals in place.
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
+    }
+
+    // CI signs releases with the key from repository secrets (see .github/workflows/release.yml). Without these
+    // variables, e.g. in Android Studio, release builds stay unsigned and the "Generate Signed APK" wizard is used.
+    val releaseKeystore = System.getenv("SIGNING_KEYSTORE_PATH")?.let(::file)?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
+    // One APK per CPU type plus a universal one. The app ships no native code, so their contents match; the
+    // per-CPU names just let people pick the file that matches their phone.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = true
+        }
     }
 
     buildTypes {
         release {
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

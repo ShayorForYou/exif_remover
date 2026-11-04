@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.graphics.Color
+import android.view.HapticFeedbackConstants
 import android.window.SplashScreenView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -29,41 +30,61 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
 import com.rozin.exifremover.core.LibraryAccess
 import com.rozin.exifremover.core.MediaLibrary
 import com.rozin.exifremover.core.Prefs
-import com.rozin.exifremover.core.SaveMode
+import com.rozin.exifremover.core.Settings
 import com.rozin.exifremover.core.ThemeMode
 import com.rozin.exifremover.core.shareIntent
 import com.rozin.exifremover.core.sharedImageUris
+import com.rozin.exifremover.core.viewIntent
 import com.rozin.exifremover.ui.AppTheme
 import com.rozin.exifremover.ui.CleanState
 import com.rozin.exifremover.ui.CleanViewModel
 import com.rozin.exifremover.ui.GalleryScreen
+import com.rozin.exifremover.ui.GalleryState
 import com.rozin.exifremover.ui.GalleryViewModel
 import com.rozin.exifremover.ui.HomeScreen
 import com.rozin.exifremover.ui.InspectScreen
 import com.rozin.exifremover.ui.isDark
 import com.rozin.exifremover.ui.ResultsScreen
 import com.rozin.exifremover.ui.WorkingScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: CleanViewModel by viewModels()
     private val gallery: GalleryViewModel by viewModels()
 
+    /** False while the system splash is still on screen; the first real screen is only composed after it's gone. */
+    private val splashDone = mutableStateOf(true)
+
+    /** Set by the "Choose photos" shortcut and the Quick Settings tile; the UI opens the gallery once it's up. */
+    private val galleryRequested = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) splashScreen.setOnExitAnimationListener(::exitSplash)
-        if (savedInstanceState == null) openShared(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && savedInstanceState == null) {
+            splashDone.value = false
+            splashScreen.setOnExitAnimationListener(::exitSplash)
+        }
+        if (savedInstanceState == null) handle(intent)
+        lifecycleScope.launch { viewModel.finished.collect(::onFinished) }
         setContent {
             var themeMode by remember { mutableStateOf(Prefs.themeMode(this)) }
             val dark = themeMode.isDark()
@@ -80,6 +101,10 @@ class MainActivity : ComponentActivity() {
             AppTheme(themeMode) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     App(
+                        splashDone = splashDone.value,
+                        onSplashTimeout = { splashDone.value = true },
+                        galleryRequested = galleryRequested.value,
+                        onGalleryRequestHandled = { galleryRequested.value = false },
                         viewModel = viewModel,
                         gallery = gallery,
                         themeMode = themeMode,
@@ -96,6 +121,7 @@ class MainActivity : ComponentActivity() {
     /**
      * Lets the splash icon animation (res/drawable/splash_icon.xml, under a second) play out instead of being cut off
      * when the app is ready first, then zooms the icon away as the splash fades into the app.
+     * Home is composed only once the splash is removed: building it while the exit animation runs drops frames.
      */
     @RequiresApi(Build.VERSION_CODES.S)
     private fun exitSplash(splash: SplashScreenView) {
@@ -114,13 +140,25 @@ class MainActivity : ComponentActivity() {
         splash.animate()
             .alpha(0f)
             .setStartDelay(remaining).setDuration(SPLASH_EXIT_MS)
-            .withEndAction(splash::remove)
+            .withEndAction {
+                splash.remove()
+                splashDone.value = true
+            }
             .start()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        openShared(intent)
+        handle(intent)
+    }
+
+    private fun handle(intent: Intent) {
+        when (intent.action) {
+            ACTION_CHOOSE -> galleryRequested.value = true
+            ACTION_LATEST_PHOTO -> openLatest(screenshots = false)
+            ACTION_LATEST_SCREENSHOT -> openLatest(screenshots = true)
+            else -> openShared(intent)
+        }
     }
 
     /**
@@ -131,18 +169,65 @@ class MainActivity : ComponentActivity() {
         val uris = intent.sharedImageUris().take(MAX_PICK)
         if (uris.isEmpty()) return
         viewModel.reset()
-        viewModel.open(uris, Prefs.saveMode(this), Prefs.keepOrientation(this))
+        viewModel.open(uris, Prefs.settings(this))
+    }
+
+    /** Launcher shortcuts: the newest photo or screenshot, straight into its details. Without access, ask first. */
+    private fun openLatest(screenshots: Boolean) {
+        if (MediaLibrary.access(this) == LibraryAccess.NONE) {
+            galleryRequested.value = true
+            return
+        }
+        lifecycleScope.launch {
+            val uri = withContext(Dispatchers.IO) { MediaLibrary.latest(this@MainActivity, screenshots) }
+            if (uri == null) {
+                Toast.makeText(this@MainActivity, if (screenshots) "No screenshots found" else "No photos found", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            viewModel.reset()
+            viewModel.open(listOf(uri), Prefs.settings(this@MainActivity))
+        }
+    }
+
+    /** A tick when the results land in front of the user; a summary when they've switched to another app meanwhile. */
+    private fun onFinished(done: CleanState.Done) {
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            window.decorView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            return
+        }
+        val cleaned = done.cleaned.size
+        val summary = buildString {
+            append(if (cleaned == 1) "1 photo cleaned" else "$cleaned photos cleaned")
+            if (done.failed.isNotEmpty()) append(" · ${done.failed.size} failed")
+            append(". Open EXIF Remover to save.")
+        }
+        Toast.makeText(this, summary, Toast.LENGTH_LONG).show()
+    }
+
+    companion object {
+        const val ACTION_CHOOSE = "com.rozin.exifremover.action.CHOOSE"
+        const val ACTION_LATEST_PHOTO = "com.rozin.exifremover.action.LATEST_PHOTO"
+        const val ACTION_LATEST_SCREENSHOT = "com.rozin.exifremover.action.LATEST_SCREENSHOT"
     }
 }
 
-private const val MAX_PICK = 100
+private const val MAX_PICK = GalleryState.MAX_SELECTION
 private const val SPLASH_EXIT_MS = 250L
+/** Some launches (e.g. from another app's share sheet) show no splash, so its exit callback never comes. */
+private const val SPLASH_FALLBACK_MS = 2000L
+
+/** Blank background under the system splash, so nothing heavy is composed while it animates out. */
+private object SplashRoute
 
 /** The in-app gallery sits in front of the home screen, before any cleaning state exists. */
 private object GalleryRoute
 
 @Composable
 private fun App(
+    splashDone: Boolean,
+    onSplashTimeout: () -> Unit,
+    galleryRequested: Boolean,
+    onGalleryRequestHandled: () -> Unit,
     viewModel: CleanViewModel,
     gallery: GalleryViewModel,
     themeMode: ThemeMode,
@@ -151,16 +236,18 @@ private fun App(
     val context = LocalContext.current
     val state by viewModel.state.collectAsState()
     val galleryState by gallery.state.collectAsState()
-    var saveMode by remember { mutableStateOf(Prefs.saveMode(context)) }
-    var keepOrientation by remember { mutableStateOf(Prefs.keepOrientation(context)) }
+    var settings by remember { mutableStateOf(Prefs.settings(context)) }
     var picking by rememberSaveable { mutableStateOf(false) }
 
     // Fallback when photo access is denied: document URIs map back to the real MediaStore rows.
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
-        viewModel.open(it, saveMode, keepOrientation)
+        viewModel.open(it, settings)
     }
-    val writeConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
-        viewModel.onWriteConsent(it.resultCode == Activity.RESULT_OK)
+    val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+        viewModel.onConsent(it.resultCode == Activity.RESULT_OK)
+    }
+    LaunchedEffect(Unit) {
+        viewModel.consentRequests.collect { consent.launch(IntentSenderRequest.Builder(it).build()) }
     }
     // Both modes use the in-app gallery, not the system photo picker: the picker strips GPS from what it hands
     // out, so the details screen could never show the location. Gallery items are real MediaStore rows, which
@@ -188,61 +275,97 @@ private fun App(
     }
     fun closeGallery() {
         picking = false
+        gallery.stopLocationCheck()
         gallery.clearSelection()
     }
 
-    val screen: Any = if (picking && state is CleanState.Idle) GalleryRoute else state
+    if (!splashDone) {
+        LaunchedEffect(Unit) {
+            delay(SPLASH_FALLBACK_MS)
+            onSplashTimeout()
+        }
+    }
+    val currentOpenGallery by rememberUpdatedState(::openGallery)
+    LaunchedEffect(galleryRequested, splashDone) {
+        if (galleryRequested && splashDone) {
+            onGalleryRequestHandled()
+            viewModel.reset()
+            currentOpenGallery()
+        }
+    }
+
+    val screen: Any = when {
+        !splashDone -> SplashRoute
+        picking && state is CleanState.Idle -> GalleryRoute
+        else -> state
+    }
     BackHandler(enabled = screen === GalleryRoute) { closeGallery() }
-    BackHandler(enabled = state !is CleanState.Idle && state !is CleanState.Working, onBack = viewModel::reset)
+    // Back from the progress screen cancels the batch, same as its Cancel button.
+    BackHandler(enabled = state !is CleanState.Idle, onBack = viewModel::reset)
 
     AnimatedContent(
         targetState = screen,
-        contentKey = { if (it === GalleryRoute) "gallery" else it::class },
+        contentKey = {
+            when (it) {
+                SplashRoute -> "splash"
+                GalleryRoute -> "gallery"
+                else -> it::class
+            }
+        },
         transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.96f)) togetherWith fadeOut() },
         label = "screen",
     ) { current ->
         when (current) {
+            SplashRoute -> Unit
             GalleryRoute -> GalleryScreen(
                 state = galleryState,
-                saveMode = saveMode,
+                saveMode = settings.saveMode,
                 onBack = ::closeGallery,
                 onAlbum = gallery::selectAlbum,
+                onToggleLocated = gallery::toggleOnlyLocated,
                 onToggle = { gallery.toggle(it.uri) },
+                onDragSelect = gallery::applyRange,
                 onSelectAll = gallery::selectAllVisible,
                 onClear = gallery::clearSelection,
                 onAddMore = { libraryAccess.launch(MediaLibrary.permissions()) },
                 onClean = {
                     val uris = galleryState.selected.toList()
                     closeGallery()
-                    viewModel.open(uris, saveMode, keepOrientation)
+                    viewModel.open(uris, settings)
                 },
             )
             CleanState.Idle -> HomeScreen(
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
-                saveMode = saveMode,
-                onSaveModeChange = {
-                    saveMode = it
-                    Prefs.setSaveMode(context, it)
-                },
-                keepOrientation = keepOrientation,
-                onKeepOrientationChange = {
-                    keepOrientation = it
-                    Prefs.setKeepOrientation(context, it)
+                settings = settings,
+                onSettingsChange = { changed: Settings ->
+                    settings = changed
+                    Prefs.setSettings(context, changed)
                 },
                 onChoosePhotos = ::openGallery,
             )
-            is CleanState.Working -> WorkingScreen(current.done, current.total)
+            is CleanState.Working -> WorkingScreen(current.done, current.total, onCancel = viewModel::reset)
             is CleanState.Inspecting -> InspectScreen(
                 state = current,
                 onBack = viewModel::reset,
-                onRemoveAll = { viewModel.removeAll(keepOrientation) },
+                onRemoveAll = viewModel::removeAll,
             )
             is CleanState.Done -> ResultsScreen(
                 state = current,
                 onClose = viewModel::reset,
-                onSave = { viewModel.save()?.let { writeConsent.launch(IntentSenderRequest.Builder(it).build()) } },
-                onShare = { context.startActivity(context.shareIntent(current.cleaned)) },
+                onSave = viewModel::save,
+                onShare = {
+                    viewModel.markShared()
+                    context.startActivity(context.shareIntent(current.cleaned))
+                },
+                onSaveCopies = viewModel::saveAsCopies,
+                onRetry = viewModel::retryFailed,
+                onOpen = viewModel::showDetail,
+                onCloseDetail = viewModel::hideDetail,
+                onView = { uri ->
+                    runCatching { context.startActivity(context.viewIntent(uri)) }
+                        .onFailure { Toast.makeText(context, "No app can open photos", Toast.LENGTH_SHORT).show() }
+                },
             )
         }
     }

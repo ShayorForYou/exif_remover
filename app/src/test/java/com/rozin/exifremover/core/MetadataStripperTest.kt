@@ -52,6 +52,51 @@ class MetadataStripperTest {
         assertEquals(0, report.removedBytes)
     }
 
+    @Test
+    fun jpegKeepDateRebuildsExifWithOnlyTheCaptureTime() {
+        val dirty = encode("jpg").insert(APP0_END, jpegSegment(0xE1, "Exif\u0000\u0000".toByteArray() + richTiff()))
+
+        val (out, report) = strip(dirty, StripOptions(keepOrientation = true, keepDate = true))
+
+        val text = String(out, Charsets.ISO_8859_1)
+        assertTrue(report.hadLocation)
+        assertTrue(DATE in text && ZONE in text)
+        assertFalse(MAKE in text)
+        assertFalse(out.containsRun(LATITUDE_BYTE, 24))
+        assertNotNull(ImageIO.read(ByteArrayInputStream(out)))
+        // Cleaning a cleaned file changes nothing.
+        assertArrayEquals(out, strip(out, StripOptions(keepDate = true)).first)
+    }
+
+    @Test
+    fun jpegLocationOnlyKeepsEverythingButGps() {
+        val dirty = encode("jpg").insert(APP0_END, jpegSegment(0xE1, "Exif\u0000\u0000".toByteArray() + richTiff()))
+
+        val (out, report) = strip(dirty, StripOptions(level = StripLevel.LOCATION))
+
+        val text = String(out, Charsets.ISO_8859_1)
+        assertTrue(report.hadLocation)
+        assertTrue(report.removedBytes > 0)
+        assertEquals(dirty.size, out.size) // zeroed in place, nothing shifted
+        assertTrue(MAKE in text && DATE in text && ZONE in text)
+        assertFalse(out.containsRun(LATITUDE_BYTE, 24))
+        assertFalse(strip(out, StripOptions(level = StripLevel.LOCATION)).second.hadLocation)
+        assertNotNull(ImageIO.read(ByteArrayInputStream(out)))
+    }
+
+    @Test
+    fun webpKeepDateKeepsTheExifFlag() {
+        val vp8x = webpChunk("VP8X", bytes(0x0C, 0, 0, 0, 9, 0, 0, 9, 0, 0))
+        val image = webpChunk("VP8L", bytes(0x2F, 1, 2, 3, 4))
+        val dirty = riff(vp8x + image + webpChunk("EXIF", richTiff()) + webpChunk("XMP ", "<x/>".toByteArray()))
+
+        val (out, _) = strip(dirty, StripOptions(keepDate = true))
+
+        assertEquals(0x08, out[20].toInt()) // VP8X flags: EXIF kept, XMP cleared
+        assertTrue(DATE in String(out, Charsets.ISO_8859_1))
+        assertFalse(MAKE in String(out, Charsets.ISO_8859_1))
+    }
+
     @Test(expected = MalformedImageException::class)
     fun truncatedJpegIsRejected() {
         strip(bytes(0xFF, 0xD8, 0xFF, 0xE1, 0x10, 0x00, 1, 2, 3), keepOrientation = false)
@@ -159,10 +204,13 @@ class MetadataStripperTest {
         return ftyp + fullBox("meta", 0, iinf + iloc(imageOffset) + idat) + box("mdat", image)
     }
 
-    private fun strip(input: ByteArray, keepOrientation: Boolean): Pair<ByteArray, StripReport> {
+    private fun strip(input: ByteArray, keepOrientation: Boolean): Pair<ByteArray, StripReport> =
+        strip(input, StripOptions(keepOrientation = keepOrientation, keepDate = false))
+
+    private fun strip(input: ByteArray, options: StripOptions): Pair<ByteArray, StripReport> {
         val format = requireNotNull(MetadataStripper.detect(input)) { "undetected format" }
         val out = ByteArrayOutputStream()
-        val report = MetadataStripper.strip(input, format, out, keepOrientation)
+        val report = MetadataStripper.strip(input, format, out, options)
         return out.toByteArray() to report
     }
 
@@ -188,6 +236,44 @@ class MetadataStripperTest {
         0x25, 0x88, 4, 0, 1, 0, 0, 0, 38, 0, 0, 0,
         0, 0, 0, 0,
     )
+
+    /**
+     * Little-endian TIFF: IFD0 = [Make → "Pixel", Exif IFD, GPS IFD]; Exif IFD = [DateTimeOriginal, OffsetTimeOriginal];
+     * GPS IFD = [GPSLatitude, 3 rationals filled with [LATITUDE_BYTE]].
+     */
+    private fun richTiff(): ByteArray {
+        val buf = java.nio.ByteBuffer.allocate(156).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        fun entry(tag: Int, type: Int, count: Int, value: Int) {
+            buf.putShort(tag.toShort()).putShort(type.toShort()).putInt(count).putInt(value)
+        }
+        buf.put("II".toByteArray()).putShort(42).putInt(8)
+        buf.putShort(3) // IFD0 @ 8
+        entry(0x010F, 2, 6, 98)
+        entry(0x8769, 4, 1, 50)
+        entry(0x8825, 4, 1, 80)
+        buf.putInt(0)
+        buf.putShort(2) // Exif IFD @ 50
+        entry(0x9003, 2, 20, 104)
+        entry(0x9011, 2, 7, 124)
+        buf.putInt(0)
+        buf.putShort(1) // GPS IFD @ 80
+        entry(0x0002, 5, 3, 132)
+        buf.putInt(0)
+        buf.put("$MAKE\u0000".toByteArray()) // @ 98
+        buf.put("$DATE\u0000".toByteArray()) // @ 104
+        buf.put("$ZONE\u0000".toByteArray()).put(0) // @ 124, padded
+        repeat(24) { buf.put(LATITUDE_BYTE.toByte()) } // @ 132
+        return buf.array()
+    }
+
+    private fun ByteArray.containsRun(value: Int, length: Int): Boolean {
+        var run = 0
+        for (byte in this) {
+            run = if (byte == value.toByte()) run + 1 else 0
+            if (run >= length) return true
+        }
+        return false
+    }
 
     private fun jpegSegment(marker: Int, payload: ByteArray) =
         bytes(0xFF, marker, (payload.size + 2) shr 8, (payload.size + 2) and 0xFF) + payload
@@ -215,5 +301,9 @@ class MetadataStripperTest {
     private companion object {
         /** ImageIO writes SOI followed by an 18-byte JFIF APP0 segment. */
         const val APP0_END = 2 + 18
+        const val MAKE = "Pixel"
+        const val DATE = "2024:05:01 10:20:30"
+        const val ZONE = "+02:00"
+        const val LATITUDE_BYTE = 0x7B
     }
 }

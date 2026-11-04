@@ -1,0 +1,100 @@
+# Pushing a version tag (e.g. v1.1.0) builds signed APKs, one per CPU type plus a universal one, and publishes them
+# as a GitHub release whose text comes from .github/release-notes/<tag>.md.
+#
+# Needs four repository secrets (Settings → Secrets and variables → Actions):
+#   KEYSTORE_BASE64    the release keystore, base64-encoded: base64 -i release.jks | pbcopy
+#   KEYSTORE_PASSWORD  its store password
+#   KEY_ALIAS          the key's alias
+#   KEY_PASSWORD       the key's password
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build and release, e.g. v1.1.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check that the tag matches the app version
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*versionName = "(.*)"/\1/p' app/build.gradle.kts)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG doesn't match versionName $version in app/build.gradle.kts"
+            exit 1
+          fi
+          test -f ".github/release-notes/$TAG.md" || { echo "::error::Missing .github/release-notes/$TAG.md"; exit 1; }
+
+      - name: Restore the signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository secret $name is not set. See the top of .github/workflows/release.yml."
+              exit 1
+            fi
+          done
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Test and build signed APKs
+        env:
+          SIGNING_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest assembleRelease --no-daemon
+
+      - name: Verify signatures and name the files
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          mkdir dist
+          # Unsigned builds are named *-release-unsigned.apk and so never match here.
+          for apk in app/build/outputs/apk/release/app-*-release.apk; do
+            variant=$(basename "$apk" | sed -E 's/^app-(.*)-release\.apk$/\1/')
+            "$apksigner" verify "$apk"
+            cp "$apk" "dist/exif-remover-$TAG-$variant.apk"
+          done
+          test "$(ls dist/*.apk | wc -l)" -eq 5 || { echo "::error::Expected 5 signed APKs"; ls -l app/build/outputs/apk/release; exit 1; }
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          ls -l dist
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: EXIF Remover ${{ env.TAG }}
+          body_path: .github/release-notes/${{ env.TAG }}.md
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

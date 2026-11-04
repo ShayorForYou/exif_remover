@@ -35,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rozin.exifremover.core.ExifField
 import com.rozin.exifremover.core.ExifGroup
+import com.rozin.exifremover.core.StripLevel
+import com.rozin.exifremover.core.StripOptions
 
 /** Read-only view of what a photo carries. Cleaning always removes all of it. */
 @Composable
@@ -56,6 +59,9 @@ fun InspectScreen(
     val inspection = state.inspection
     val fields = inspection.fields
     val location = fields.firstOrNull { it.label == "Coordinates" }
+    val options = state.settings.strip
+    val removed = remember(fields, options) { fields.count { !options.keeps(it) } }
+    val locationOnly = options.level == StripLevel.LOCATION
 
     Column(Modifier.fillMaxSize().background(colors.background)) {
         LazyColumn(
@@ -89,8 +95,9 @@ fun InspectScreen(
                         Text(
                             when {
                                 fields.isEmpty() -> "No EXIF details found"
-                                fields.size == 1 -> "1 detail will be removed"
-                                else -> "${fields.size} details will be removed"
+                                removed == 0 -> "Nothing here will be removed"
+                                removed == 1 -> "1 detail will be removed"
+                                else -> "$removed details will be removed"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant,
@@ -107,7 +114,7 @@ fun InspectScreen(
             }
 
             items(state.groups.entries.toList(), key = { it.key }) { (group, groupFields) ->
-                FieldGroup(group, groupFields)
+                FieldGroup(group, groupFields, kept = options::keeps)
             }
         }
 
@@ -118,10 +125,10 @@ fun InspectScreen(
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = MaterialTheme.shapes.medium,
             ) {
-                Text("Remove all metadata")
+                Text(if (locationOnly) "Remove location" else "Remove all metadata")
             }
             Text(
-                "Image quality and format stay exactly the same.",
+                if (locationOnly) "Camera details and dates stay. Image quality is untouched." else "Image quality and format stay exactly the same.",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -161,8 +168,14 @@ private fun LocationCallout(value: String) {
     }
 }
 
+/** Whether cleaning with these options leaves [field] in the photo. */
+internal fun StripOptions.keeps(field: ExifField): Boolean = when (level) {
+    StripLevel.LOCATION -> field.group != ExifGroup.LOCATION
+    StripLevel.ALL -> (keepDate && field.label == "Taken") || (keepOrientation && field.label == "Orientation")
+}
+
 @Composable
-private fun FieldGroup(group: ExifGroup, fields: List<ExifField>) {
+private fun FieldGroup(group: ExifGroup, fields: List<ExifField>, kept: (ExifField) -> Boolean) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.padding(top = 28.dp)) {
         Row(
@@ -177,34 +190,39 @@ private fun FieldGroup(group: ExifGroup, fields: List<ExifField>) {
             Spacer(Modifier.width(8.dp))
             Text(group.title.uppercase(), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         }
-        Surface(
-            shape = MaterialTheme.shapes.medium,
-            color = colors.surfaceContainerLow,
-            border = BorderStroke(1.dp, colors.outlineVariant),
-        ) {
-            Column {
-                fields.forEachIndexed { index, field ->
-                    if (index > 0) HorizontalDivider(Modifier.padding(start = 16.dp), color = colors.outlineVariant)
-                    FieldRow(field)
-                }
+        FieldCard(fields, kept)
+    }
+}
+
+/** Label/value rows in one outlined card. Fields that [kept] marks are tagged, so it's clear they stay. */
+@Composable
+internal fun FieldCard(fields: List<ExifField>, kept: (ExifField) -> Boolean = { false }) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = colors.surfaceContainerLow,
+        border = BorderStroke(1.dp, colors.outlineVariant),
+    ) {
+        Column {
+            fields.forEachIndexed { index, field ->
+                if (index > 0) HorizontalDivider(Modifier.padding(start = 16.dp), color = colors.outlineVariant)
+                FieldRow(field, kept(field))
             }
         }
     }
 }
 
 @Composable
-private fun FieldRow(field: ExifField) {
+private fun FieldRow(field: ExifField, kept: Boolean) {
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Text(
-            field.label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.onSurfaceVariant,
-            modifier = Modifier.weight(0.4f),
-        )
+        Column(Modifier.weight(0.4f)) {
+            Text(field.label, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+            if (kept) Text("Kept", style = MaterialTheme.typography.labelSmall, color = colors.primary)
+        }
         Spacer(Modifier.width(12.dp))
         Text(
             field.value,

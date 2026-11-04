@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shortcut labels must be string resources; short ones should fit about 10 characters. -->
+    <string name="shortcut_latest_photo">Latest photo</string>
+    <string name="shortcut_latest_photo_long">Clean latest photo</string>
+    <string name="shortcut_latest_screenshot">Screenshot</string>
+    <string name="shortcut_latest_screenshot_long">Clean latest screenshot</string>
+    <string name="shortcut_choose">Choose</string>
+    <string name="shortcut_choose_long">Choose photos to clean</string>
+    <string name="tile_label">Clean photos</string>
+</resources>
