@@ -1,10 +1,19 @@
-# Every push and pull request: unit tests, lint and a debug build, so a broken change shows up before a release.
+# Pushes and pull requests to production: unit tests, lint and a debug build, so a broken change shows up before a
+# release. main is the public face of the repo (README, release notes), so edits there never start a build; neither
+# do docs-only changes on production. Releases are built separately, from version tags (release.yml).
 name: CI
 
 on:
   push:
-    branches: [main, production]
+    branches: [production]
+    paths-ignore:
+      - "**.md"
+      - ".github/release-notes/**"
   pull_request:
+    branches: [production]
+    paths-ignore:
+      - "**.md"
+      - ".github/release-notes/**"
 
 concurrency:
   group: ci-${{ github.ref }}
