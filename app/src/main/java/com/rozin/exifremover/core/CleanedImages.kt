@@ -15,6 +15,7 @@ import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
 import com.rozin.exifremover.MainActivity
 import com.rozin.exifremover.ShareActivity
+import com.rozin.exifremover.core.CleanedFileProvider.Companion.asFile
 
 /** Image URIs carried by an incoming ACTION_SEND / ACTION_SEND_MULTIPLE share; empty for anything else. */
 fun Intent.sharedImageUris(): List<Uri> {
@@ -29,22 +30,31 @@ fun Intent.sharedImageUris(): List<Uri> {
     return (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
 }
 
-/** System share sheet for the cleaned copies, with our own share targets hidden. */
-fun Context.shareIntent(images: List<CleanResult.Cleaned>): Intent {
-    val uris = images.map { FileProvider.getUriForFile(this, "$packageName.files", it.file) }
+/**
+ * System share sheet for the cleaned copies, with our own share targets hidden.
+ * With [asFile], they're offered as generic files, so chat apps send them as documents at full quality.
+ */
+fun Context.shareIntent(images: List<CleanResult.Cleaned>, asFile: Boolean = false): Intent {
+    val uris = images.map { image ->
+        FileProvider.getUriForFile(this, "$packageName.files", image.file).let { if (asFile) it.asFile() else it }
+    }
     val send = if (uris.size == 1) {
         Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
     } else {
         Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
     }
-    send.type = images.map { it.mimeType }.distinct().singleOrNull() ?: "image/*"
+    send.type = if (asFile) CleanedFileProvider.GENERIC_TYPE else images.map { it.mimeType }.distinct().singleOrNull() ?: "image/*"
     // ClipData is what carries the read grant through the chooser to the target app.
     send.clipData = ClipData.newRawUri(null, uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
     send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     return Intent.createChooser(send, null)
         .putExtra(
             Intent.EXTRA_EXCLUDE_COMPONENTS,
-            arrayOf(ComponentName(this, ShareActivity::class.java), ComponentName(this, MainActivity::class.java)),
+            arrayOf(
+                ComponentName(this, ShareActivity::class.java),
+                ComponentName(this, ShareActivity.AS_FILE_ALIAS),
+                ComponentName(this, MainActivity::class.java),
+            ),
         )
 }
 

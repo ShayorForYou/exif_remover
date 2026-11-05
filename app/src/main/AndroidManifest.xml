@@ -60,6 +60,25 @@
             </intent-filter>
         </activity>
 
+        <!-- Same flow, but the clean copies are shared as generic files, so chat apps (WhatsApp…) send them as
+             documents at full quality instead of re-compressing them as photos. -->
+        <activity-alias
+            android:name=".ShareAsFileActivity"
+            android:exported="true"
+            android:label="Strip &amp; share as file"
+            android:targetActivity=".ShareActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity-alias>
+
         <!-- Quick Settings tile that opens the gallery picker. -->
         <service
             android:name=".CleanTileService"
@@ -76,7 +95,7 @@
         </service>
 
         <provider
-            android:name="androidx.core.content.FileProvider"
+            android:name=".core.CleanedFileProvider"
             android:authorities="${applicationId}.files"
             android:exported="false"
             android:grantUriPermissions="true">

@@ -28,6 +28,7 @@ import com.rozin.exifremover.ui.CleanViewModel
 /**
  * "Strip & share" target in the system share sheet: cleans whatever was shared, then immediately
  * re-opens the share sheet with the clean copies. Originals are never forwarded.
+ * Launched through [AS_FILE_ALIAS], the copies are shared as generic files, so chat apps send them uncompressed.
  */
 class ShareActivity : ComponentActivity() {
 
@@ -96,8 +97,13 @@ class ShareActivity : ComponentActivity() {
         if (isFinishing) return
         if (cleaned.isNotEmpty()) {
             viewModel.markShared()
-            startActivity(shareIntent(cleaned))
+            startActivity(shareIntent(cleaned, asFile = intent.component?.className == AS_FILE_ALIAS))
         }
         finish()
+    }
+
+    companion object {
+        /** "Strip & share as file": same flow, but the clean copies go out as documents (see manifest alias). */
+        const val AS_FILE_ALIAS = "com.rozin.exifremover.ShareAsFileActivity"
     }
 }

@@ -14,8 +14,8 @@ android {
         // 30: MediaStore.createWriteRequest, the consent dialog for replacing originals in place.
         minSdk = 30
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
     }
 
     // CI signs releases with the key from repository secrets (see .github/workflows/release.yml). Without these
@@ -29,17 +29,6 @@ android {
                 keyAlias = System.getenv("SIGNING_KEY_ALIAS")
                 keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
             }
-        }
-    }
-
-    // One APK per CPU type plus a universal one. The app ships no native code, so their contents match; the
-    // per-CPU names just let people pick the file that matches their phone.
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
-            isUniversalApk = true
         }
     }
 

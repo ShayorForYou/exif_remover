@@ -1,5 +1,5 @@
-# Pushing a version tag (e.g. v1.1.0) builds signed APKs, one per CPU type plus a universal one, and publishes them
-# as a GitHub release whose text comes from .github/release-notes/<tag>.md.
+# Pushing a version tag (e.g. v1.1.0) builds one signed universal APK (the app has no native code, so it runs on
+# every phone) and publishes it as a GitHub release whose text comes from .github/release-notes/<tag>.md.
 #
 # Needs four repository secrets (Settings → Secrets and variables → Actions):
 #   KEYSTORE_BASE64    the release keystore, base64-encoded: base64 -i release.jks | pbcopy
@@ -64,7 +64,7 @@ jobs:
           java-version: 21
           cache: gradle
 
-      - name: Test and build signed APKs
+      - name: Test and build the signed APK
         env:
           SIGNING_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
           SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -72,17 +72,15 @@ jobs:
           SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew testDebugUnitTest assembleRelease --no-daemon
 
-      - name: Verify signatures and name the files
+      - name: Verify the signature and name the file
         run: |
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          # An unsigned build is named app-release-unsigned.apk and so fails this check.
+          apk=app/build/outputs/apk/release/app-release.apk
+          test -f "$apk" || { echo "::error::No signed APK"; ls -l app/build/outputs/apk/release; exit 1; }
+          "$apksigner" verify "$apk"
           mkdir dist
-          # Unsigned builds are named *-release-unsigned.apk and so never match here.
-          for apk in app/build/outputs/apk/release/app-*-release.apk; do
-            variant=$(basename "$apk" | sed -E 's/^app-(.*)-release\.apk$/\1/')
-            "$apksigner" verify "$apk"
-            cp "$apk" "dist/exif-remover-$TAG-$variant.apk"
-          done
-          test "$(ls dist/*.apk | wc -l)" -eq 5 || { echo "::error::Expected 5 signed APKs"; ls -l app/build/outputs/apk/release; exit 1; }
+          cp "$apk" "dist/exif-remover-$TAG.apk"
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           ls -l dist
 

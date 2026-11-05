@@ -2,7 +2,9 @@ package com.rozin.exifremover.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -110,8 +112,10 @@ fun HomeScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            // Outside the scroll, so the status bar keeps a fixed strip and content clips below it instead of
+            // scrolling underneath the (transparent, edge-to-edge) bar.
             .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
             .navigationBarsPadding()
             .padding(horizontal = 24.dp, vertical = 20.dp),
     ) {
@@ -235,36 +239,63 @@ private fun RemoveChips(options: StripOptions, onChange: (StripOptions) -> Unit)
         delay(LOCKED_HINT_MS)
         showLockedHint = false
     }
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        RemoveChip(Icons.Outlined.LocationOn, "Location", removed = true, locked = true) { lockedTapped++ }
-        RemoveChip(Icons.Outlined.PhoneAndroid, "Camera & personal", removed = everything) {
-            onChange(options.copy(level = if (everything) StripLevel.LOCATION else StripLevel.ALL))
-        }
-        AnimatedVisibility(everything, enter = fadeIn() + scaleIn(initialScale = 0.9f), exit = fadeOut() + scaleOut(targetScale = 0.9f)) {
-            RemoveChip(Icons.Outlined.Event, "Date taken", removed = !options.keepDate) {
-                onChange(options.copy(keepDate = !options.keepDate))
+    Column(Modifier.fillMaxWidth()) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            RemoveChip(Icons.Outlined.LocationOn, "Location", removed = true, locked = true) { lockedTapped++ }
+            RemoveChip(Icons.Outlined.PhoneAndroid, "Camera & personal", removed = everything) {
+                onChange(options.copy(level = if (everything) StripLevel.LOCATION else StripLevel.ALL))
             }
         }
-        AnimatedVisibility(everything, enter = fadeIn() + scaleIn(initialScale = 0.9f), exit = fadeOut() + scaleOut(targetScale = 0.9f)) {
-            RemoveChip(Icons.Outlined.ScreenRotation, "Rotation", removed = !options.keepOrientation) {
-                onChange(options.copy(keepOrientation = !options.keepOrientation))
+        // The two finer choices live on their own row that unfolds from under the chips like a drawer. Items popping
+        // in and out of a wrapping row made the whole row reflow, which is what read as a jump.
+        AnimatedVisibility(
+            visible = everything,
+            enter = expandVertically(tween(MOTION_MS), expandFrom = Alignment.Top) +
+                fadeIn(tween(MOTION_MS / 2, delayMillis = MOTION_MS / 2)),
+            exit = fadeOut(tween(MOTION_MS / 2)) +
+                shrinkVertically(tween(MOTION_MS, delayMillis = MOTION_MS / 4), shrinkTowards = Alignment.Top),
+        ) {
+            FlowRow(
+                Modifier.padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                RemoveChip(Icons.Outlined.Event, "Date taken", removed = !options.keepDate) {
+                    onChange(options.copy(keepDate = !options.keepDate))
+                }
+                RemoveChip(Icons.Outlined.ScreenRotation, "Rotation", removed = !options.keepOrientation) {
+                    onChange(options.copy(keepOrientation = !options.keepOrientation))
+                }
             }
         }
+        // A fixed two-line slot: swapping sentences of different lengths never nudges the layout below, and the old
+        // text is gone before the new one shows, so they can't overlap.
+        AnimatedContent(
+            targetState = if (showLockedHint) "Location is always removed, that's the point of the app." else removeSummary(options),
+            transitionSpec = { sequentialFade() using null },
+            label = "removeSummary",
+        ) { text ->
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp, start = 2.dp),
+            )
+        }
     }
-    Crossfade(
-        targetState = if (showLockedHint) "Location is always removed, that's the point of the app." else removeSummary(options),
-        label = "removeSummary",
-    ) { text ->
-        Text(
-            text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp, start = 2.dp),
-        )
-    }
+}
+
+/** Fades the old content out, then the new one in, so the two never show on top of each other. */
+private fun sequentialFade(scaled: Boolean = false): ContentTransform {
+    val half = MOTION_MS / 2
+    val enter = fadeIn(tween(half, delayMillis = half)) +
+        if (scaled) scaleIn(tween(half, delayMillis = half), initialScale = 0.6f) else EnterTransition.None
+    val exit = fadeOut(tween(half)) + if (scaled) scaleOut(tween(half), targetScale = 0.6f) else ExitTransition.None
+    return enter togetherWith exit
 }
 
 private fun removeSummary(options: StripOptions): String {
@@ -291,8 +322,10 @@ private fun RemoveChip(icon: ImageVector, label: String, removed: Boolean, locke
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) PRESSED_SCALE else 1f, label = "chipScale")
     val shake = remember { Animatable(0f) }
-    val container by animateColorAsState(if (removed) colors.onSurface else Color.Transparent, label = "chip")
-    val content by animateColorAsState(if (removed) colors.surface else colors.onSurfaceVariant, label = "chipContent")
+    // Fill, outline and text move together on one clock, so the outline doesn't snap ahead of the fill.
+    val container by animateColorAsState(if (removed) colors.onSurface else Color.Transparent, tween(MOTION_MS), label = "chip")
+    val content by animateColorAsState(if (removed) colors.surface else colors.onSurfaceVariant, tween(MOTION_MS), label = "chipContent")
+    val outline by animateColorAsState(if (removed) colors.onSurface else colors.outlineVariant, tween(MOTION_MS), label = "chipOutline")
 
     val input = if (locked) {
         Modifier
@@ -320,7 +353,7 @@ private fun RemoveChip(icon: ImageVector, label: String, removed: Boolean, locke
             .height(36.dp)
             .clip(CircleShape)
             .background(container)
-            .border(1.dp, if (removed) colors.onSurface else colors.outlineVariant, CircleShape)
+            .border(1.dp, outline, CircleShape)
             .then(input)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -328,7 +361,7 @@ private fun RemoveChip(icon: ImageVector, label: String, removed: Boolean, locke
         // Swapping the icon for a check is what tells people the chip is a switch, not a label.
         AnimatedContent(
             targetState = removed && !locked,
-            transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.6f)) togetherWith (fadeOut() + scaleOut(targetScale = 0.6f)) },
+            transitionSpec = { sequentialFade(scaled = true) },
             label = "chipIcon",
         ) { checked ->
             Icon(
@@ -348,6 +381,8 @@ private fun RemoveChip(icon: ImageVector, label: String, removed: Boolean, locke
 }
 
 private const val PRESSED_SCALE = 0.96f
+/** One duration for every part of a chip toggle, so fill, icon, text and layout finish together. */
+private const val MOTION_MS = 240
 private const val LOCKED_HINT_MS = 2500L
 /** Horizontal offsets in dp for the locked chip's "no" shake. */
 private val SHAKE_STEPS = floatArrayOf(-6f, 6f, -4f, 4f, 0f)

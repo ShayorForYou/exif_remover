@@ -1,5 +1,14 @@
 package com.rozin.exifremover.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.rounded.CheckCircleOutline
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import android.net.Uri
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
@@ -87,7 +96,8 @@ fun ResultsScreen(
 
     state.detail?.let { DetailSheet(it, onDismiss = onCloseDetail, onRetry = onRetry.takeIf { state.saved == null }) }
 
-    Column(Modifier.fillMaxSize().background(colors.background)) {
+    // Status bar inset on the frame, not the grid: inside the grid it scrolls away and content slides under the bar.
+    Column(Modifier.fillMaxSize().background(colors.background).statusBarsPadding()) {
         LazyVerticalGrid(
             columns = GridCells.Adaptive(96.dp),
             modifier = Modifier.weight(1f),
@@ -96,7 +106,7 @@ fun ResultsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Column(Modifier.statusBarsPadding()) {
+                Column {
                     IconButton(onClick = onClose, modifier = Modifier.padding(top = 4.dp).offset(x = (-12).dp)) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(22.dp))
                     }
@@ -313,8 +323,10 @@ private fun DetailSheet(detail: Detail, onDismiss: () -> Unit, onRetry: (() -> U
     val colors = MaterialTheme.colorScheme
     val result = detail.result
     val comparison = detail.comparison
+    val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
-        LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp)) {
+        LazyColumn(state = list, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp)) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Same key as the grid tile, so this comes straight from the thumbnail cache.
@@ -361,13 +373,44 @@ private fun DetailSheet(detail: Detail, onDismiss: () -> Unit, onRetry: (() -> U
                     }
                 }
                 else -> {
-                    if (comparison.removed.isNotEmpty()) {
-                        item { SheetSection("Removed") }
-                        item { FieldCard(comparison.removed) }
+                    val removed = comparison.removed
+                    val kept = comparison.kept
+                    // Header, tiles, then each section is a title item followed by its card.
+                    val removedAt = 2
+                    val keptAt = if (removed.isEmpty()) 2 else 4
+                    if (removed.isNotEmpty() || kept.isNotEmpty()) item {
+                        Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CountTile(
+                                removed.size, "Removed", Icons.Rounded.RemoveCircleOutline,
+                                accent = colors.tertiary, container = colors.tertiaryContainer,
+                                modifier = Modifier.weight(1f),
+                                onClick = { scope.launch { list.animateScrollToItem(removedAt) }; Unit }.takeIf { removed.isNotEmpty() },
+                            )
+                            CountTile(
+                                kept.size, "Kept", Icons.Rounded.CheckCircleOutline,
+                                accent = colors.onSurface, container = colors.surfaceContainer,
+                                modifier = Modifier.weight(1f),
+                                onClick = { scope.launch { list.animateScrollToItem(keptAt) }; Unit }.takeIf { kept.isNotEmpty() },
+                            )
+                        }
                     }
-                    if (comparison.kept.isNotEmpty()) {
-                        item { SheetSection("Kept") }
-                        item { FieldCard(comparison.kept) }
+                    if (removed.isNotEmpty()) {
+                        item {
+                            SheetSection(
+                                "Removed", removed.size, "Gone from the cleaned copy",
+                                Icons.Rounded.RemoveCircleOutline, colors.tertiary,
+                            )
+                        }
+                        item { FieldCard(removed, strikeValues = true) }
+                    }
+                    if (kept.isNotEmpty()) {
+                        item {
+                            SheetSection(
+                                "Kept", kept.size, "Still in the cleaned copy",
+                                Icons.Rounded.CheckCircleOutline, colors.onSurface,
+                            )
+                        }
+                        item { FieldCard(kept) }
                     }
                     if (comparison.removed.isEmpty() && comparison.kept.isEmpty()) {
                         item { Notice(Icons.Rounded.Done, "Any other hidden blocks (XMP, vendor data) were still cleared.", error = false) }
@@ -378,14 +421,56 @@ private fun DetailSheet(detail: Detail, onDismiss: () -> Unit, onRetry: (() -> U
     }
 }
 
+/** Section title with its own icon, colour and count, so Removed and Kept can't be mistaken for each other. */
 @Composable
-private fun SheetSection(title: String) {
-    Text(
-        title.uppercase(),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(start = 4.dp, top = 24.dp, bottom = 8.dp),
-    )
+private fun SheetSection(title: String, count: Int, subtitle: String, icon: ImageVector, accent: Color) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, top = 28.dp, bottom = 10.dp).semantics(mergeDescendants = true) { heading() },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = colors.onSurface)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+        Text(
+            "$count",
+            style = MaterialTheme.typography.labelLarge,
+            color = accent,
+            modifier = Modifier.clip(CircleShape).background(accent.copy(alpha = 0.12f)).padding(horizontal = 10.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/** At-a-glance count at the top of the sheet; tapping jumps to that section. */
+@Composable
+private fun CountTile(
+    count: Int,
+    label: String,
+    icon: ImageVector,
+    accent: Color,
+    container: Color,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier
+            .clip(MaterialTheme.shapes.medium)
+            .background(container)
+            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text("$count", style = MaterialTheme.typography.titleLarge, color = colors.onSurface)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable

@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rozin.exifremover.core.ExifField
@@ -63,7 +64,8 @@ fun InspectScreen(
     val removed = remember(fields, options) { fields.count { !options.keeps(it) } }
     val locationOnly = options.level == StripLevel.LOCATION
 
-    Column(Modifier.fillMaxSize().background(colors.background)) {
+    // Status bar inset on the frame, not the list: inside the list it scrolls away and content slides under the bar.
+    Column(Modifier.fillMaxSize().background(colors.background).statusBarsPadding()) {
         LazyColumn(
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
@@ -71,7 +73,7 @@ fun InspectScreen(
             item {
                 IconButton(
                     onClick = onBack,
-                    modifier = Modifier.statusBarsPadding().padding(top = 4.dp).offset(x = (-12).dp),
+                    modifier = Modifier.padding(top = 4.dp).offset(x = (-12).dp),
                 ) {
                     Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
                 }
@@ -194,26 +196,30 @@ private fun FieldGroup(group: ExifGroup, fields: List<ExifField>, kept: (ExifFie
     }
 }
 
-/** Label/value rows in one outlined card. Fields that [kept] marks are tagged, so it's clear they stay. */
+/**
+ * Label/value rows in one outlined card. Fields that [kept] marks are tagged, so it's clear they stay.
+ * With [strikeValues], the card is tinted and every value struck through: these are gone from the photo.
+ */
 @Composable
-internal fun FieldCard(fields: List<ExifField>, kept: (ExifField) -> Boolean = { false }) {
+internal fun FieldCard(fields: List<ExifField>, kept: (ExifField) -> Boolean = { false }, strikeValues: Boolean = false) {
     val colors = MaterialTheme.colorScheme
+    val divider = if (strikeValues) colors.tertiary.copy(alpha = 0.18f) else colors.outlineVariant
     Surface(
         shape = MaterialTheme.shapes.medium,
-        color = colors.surfaceContainerLow,
-        border = BorderStroke(1.dp, colors.outlineVariant),
+        color = if (strikeValues) colors.tertiaryContainer else colors.surfaceContainerLow,
+        border = BorderStroke(1.dp, if (strikeValues) colors.tertiary.copy(alpha = 0.35f) else colors.outlineVariant),
     ) {
         Column {
             fields.forEachIndexed { index, field ->
-                if (index > 0) HorizontalDivider(Modifier.padding(start = 16.dp), color = colors.outlineVariant)
-                FieldRow(field, kept(field))
+                if (index > 0) HorizontalDivider(Modifier.padding(start = 16.dp), color = divider)
+                FieldRow(field, kept(field), strikeValues)
             }
         }
     }
 }
 
 @Composable
-private fun FieldRow(field: ExifField, kept: Boolean) {
+private fun FieldRow(field: ExifField, kept: Boolean, struck: Boolean = false) {
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -226,8 +232,8 @@ private fun FieldRow(field: ExifField, kept: Boolean) {
         Spacer(Modifier.width(12.dp))
         Text(
             field.value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.onSurface,
+            style = MaterialTheme.typography.bodyMedium.let { if (struck) it.copy(textDecoration = TextDecoration.LineThrough) else it },
+            color = if (struck) colors.onSurfaceVariant else colors.onSurface,
             textAlign = TextAlign.End,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
