@@ -25,6 +25,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -216,6 +217,10 @@ private const val SPLASH_EXIT_MS = 250L
 /** Some launches (e.g. from another app's share sheet) show no splash, so its exit callback never comes. */
 private const val SPLASH_FALLBACK_MS = 2000L
 
+/** Screen change: the old screen fades out, then the new one fades in. */
+private const val SCREEN_OUT_MS = 90
+private const val SCREEN_IN_MS = 210
+
 /** Blank background under the system splash, so nothing heavy is composed while it animates out. */
 private object SplashRoute
 
@@ -312,7 +317,13 @@ private fun App(
                 else -> it::class
             }
         },
-        transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.96f)) togetherWith fadeOut() },
+        // Fade through: the old screen is gone before the new one appears. Fading both at once (with the default
+        // springs the outgoing screen lingered) left two layers of text and buttons on top of each other.
+        transitionSpec = {
+            (fadeIn(tween(SCREEN_IN_MS, delayMillis = SCREEN_OUT_MS)) +
+                scaleIn(tween(SCREEN_IN_MS, delayMillis = SCREEN_OUT_MS), initialScale = 0.98f)) togetherWith
+                fadeOut(tween(SCREEN_OUT_MS))
+        },
         label = "screen",
     ) { current ->
         when (current) {

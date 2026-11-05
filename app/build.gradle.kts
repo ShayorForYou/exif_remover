@@ -14,8 +14,8 @@ android {
         // 30: MediaStore.createWriteRequest, the consent dialog for replacing originals in place.
         minSdk = 30
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
     }
 
     // CI signs releases with the key from repository secrets (see .github/workflows/release.yml). Without these

@@ -3,6 +3,7 @@ package com.rozin.exifremover.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
@@ -271,18 +272,17 @@ private fun RemoveChips(options: StripOptions, onChange: (StripOptions) -> Unit)
                 }
             }
         }
-        // A fixed two-line slot: swapping sentences of different lengths never nudges the layout below, and the old
-        // text is gone before the new one shows, so they can't overlap.
+        // Sized to the sentence, so a one-line summary leaves no blank line above the next section. When the line
+        // count changes the height eases over (no snap), and the old text is gone before the new one shows.
         AnimatedContent(
             targetState = if (showLockedHint) "Location is always removed, that's the point of the app." else removeSummary(options),
-            transitionSpec = { sequentialFade() using null },
+            transitionSpec = { sequentialFade() using SizeTransform(clip = false) { _, _ -> tween(MOTION_MS) } },
             label = "removeSummary",
         ) { text ->
             Text(
                 text,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                minLines = 2,
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp, start = 2.dp),
             )
         }
